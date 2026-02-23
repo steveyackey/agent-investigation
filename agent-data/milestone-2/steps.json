@@ -1,0 +1,162 @@
+[
+  {
+    "id": 1,
+    "name": "Add new dependencies to Cargo.toml",
+    "description": "Add `notify = \"8\"` and `notify-debouncer-mini = \"0.5\"` to [dependencies] in Cargo.toml. These are needed for file watching on cluster-deployed services with `watch = true`. Verify the project compiles with `cargo build`.",
+    "files": ["Cargo.toml"],
+    "validation": "cargo build",
+    "depends_on": []
+  },
+  {
+    "id": 2,
+    "name": "Extend config model with cluster types",
+    "description": "Extend DevrigConfig in src/config/model.rs with a new optional field: `cluster: Option<ClusterConfig>` (with `#[serde(default)]`). Define ClusterConfig with fields: name (Option<String>, defaults to \"{project.name}-dev\"), agents (u32, default 1 via `default_agents` fn), ports (Vec<String>, default empty — k3d port mapping syntax like \"8080:80@loadbalancer\"), registry (bool, default false), deploy (BTreeMap<String, ClusterDeployConfig>, default empty). Define ClusterDeployConfig with fields: context (String — Docker build context path), dockerfile (String, default \"Dockerfile\" via `default_dockerfile` fn), manifests (String — path to K8s manifests dir), watch (bool, default false), depends_on (Vec<String>, default empty). Both structs derive Debug, Clone, Deserialize, Serialize. Add unit tests: parse cluster with registry and deploy entries, parse minimal cluster block, parse cluster deploy with all fields, parse cluster deploy with defaults, parse config with cluster + infra + services, minimal config without cluster still works (backwards compatibility).",
+    "files": ["src/config/model.rs"],
+    "validation": "cargo test config::model",
+    "depends_on": [1]
+  },
+  {
+    "id": 3,
+    "name": "Extend config validation for cluster",
+    "description": "Extend validate() in src/config/validate.rs to handle the new cluster config section. Add cluster deploy names to the 'available' list so services can depend on them. Validation checks: (1) If cluster.deploy.*.depends_on references a name, it must exist in the available set (services + infra + compose + cluster.deploy). (2) If cluster.deploy exists but cluster section is absent, that's impossible by structure (deploy is inside cluster), so no check needed. (3) Each cluster.deploy entry must have non-empty context and manifests strings. (4) Cluster deploy names must not conflict with service, infra, or compose names. Add ConfigError variants: EmptyDeployContext { deploy: String }, EmptyDeployManifests { deploy: String }, DuplicateResourceName { name: String, kinds: Vec<String> }. Include cluster deploy nodes in the dependency cycle detection by adding them to deps_map. Add unit tests: service depends on cluster deploy name (valid), cluster deploy depends on infra (valid), cluster deploy with empty context (error), cluster deploy with empty manifests (error), cluster deploy name conflicts with infra name (error), cluster deploy depends on unknown name (error).",
+    "files": ["src/config/validate.rs"],
+    "validation": "cargo test config::validate",
+    "depends_on": [2]
+  },
+  {
+    "id": 4,
+    "name": "Extend state model for cluster",
+    "description": "Extend ProjectState in src/orchestrator/state.rs with a new field: `cluster: Option<ClusterState>` (with `#[serde(default)]`). Define ClusterState with fields: cluster_name (String), kubeconfig_path (String), registry_name (Option<String>), registry_port (Option<u16>), deployed_services (BTreeMap<String, ClusterDeployState>). Define ClusterDeployState with fields: image_tag (String), last_deployed (DateTime<Utc>). All new structs derive Debug, Clone, Serialize, Deserialize. The `#[serde(default)]` on the cluster field ensures backwards compatibility with existing state files from v0.2.",
+    "files": ["src/orchestrator/state.rs"],
+    "validation": "cargo build && cargo test",
+    "depends_on": [1]
+  },
+  {
+    "id": 5,
+    "name": "Extend dependency graph with ClusterDeploy",
+    "description": "Extend the DependencyResolver in src/orchestrator/graph.rs to support ClusterDeploy nodes. Add `ClusterDeploy` variant to the ResourceKind enum. In from_config(), if config.cluster is Some, iterate config.cluster.deploy entries and add each as a ClusterDeploy node in the graph. Add edges for cluster deploy depends_on (each dep must exist in the node_map). Add unit tests: cluster deploy in graph ordering, service depends on cluster deploy, cluster deploy depends on infra ordering, mixed graph with all four resource types (service, infra, compose, cluster_deploy), cluster deploy cycle detection, cluster deploy with unknown dependency errors.",
+    "files": ["src/orchestrator/graph.rs"],
+    "validation": "cargo test orchestrator::graph",
+    "depends_on": [2]
+  },
+  {
+    "id": 6,
+    "name": "Implement K3dManager core",
+    "description": "Create the new src/cluster/ module. Create src/cluster/mod.rs as the module root with K3dManager struct and re-exports of submodules (registry, deploy, watcher — initially just empty module declarations). Register the cluster module in src/lib.rs. K3dManager struct holds: cluster_name (String), slug (String), kubeconfig_path (PathBuf), network_name (String), config (ClusterConfig). Implement methods: (1) new(slug, config, state_dir, network_name) -> Self: constructs the manager, sets cluster_name to config.name or \"{project_name}-dev\" format as \"devrig-{slug}\", sets kubeconfig_path to state_dir.join(\"kubeconfig\"). (2) async create_cluster() -> Result<()>: check if cluster exists first (idempotent), then run `k3d cluster create devrig-{slug} --network {network} --agents {n} --kubeconfig-update-default=false --kubeconfig-switch-context=false --api-port 127.0.0.1:0 {port_flags} {registry_flags}`. Port flags: map each config.ports entry to `-p {entry}`. Registry flags: if config.registry, add `--registry-create k3d-devrig-{slug}-reg:0.0.0.0:0`. (3) async delete_cluster() -> Result<()>: run `k3d cluster delete devrig-{slug}`, then remove kubeconfig file. (4) async cluster_exists() -> Result<bool>: run `k3d cluster list -o json`, parse JSON, check if cluster name exists. (5) async write_kubeconfig() -> Result<()>: run `k3d kubeconfig get devrig-{slug}`, write stdout to kubeconfig_path. (6) async kubectl(args: &[&str]) -> Result<String>: run kubectl with KUBECONFIG env set to kubeconfig_path, capture and return stdout, bail on non-zero exit. (7) Helper async run_k3d(args: &[&str]) -> Result<String>: execute k3d with args, capture output, bail on failure with stderr message. All methods use tokio::process::Command.",
+    "files": ["src/cluster/mod.rs", "src/lib.rs"],
+    "validation": "cargo build",
+    "depends_on": [2, 4]
+  },
+  {
+    "id": 7,
+    "name": "Implement registry support",
+    "description": "Create src/cluster/registry.rs implementing local registry lifecycle. Implement async get_registry_port(slug: &str) -> Result<u16>: shell out to `docker inspect k3d-devrig-{slug}-reg --format '{{(index .NetworkSettings.Ports \"5000/tcp\" 0).HostPort}}'`, parse the output as u16. Implement async wait_for_registry(port: u16) -> Result<()>: use reqwest GET to `http://localhost:{port}/v2/` with backon exponential backoff (250ms initial, 3s max, 15s total timeout), check for 2xx response. Register the module in src/cluster/mod.rs.",
+    "files": ["src/cluster/registry.rs", "src/cluster/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [6]
+  },
+  {
+    "id": 8,
+    "name": "Implement deploy pipeline",
+    "description": "Create src/cluster/deploy.rs implementing the build-push-apply pipeline for cluster.deploy.* entries. Implement async run_deploy(name: &str, deploy_config: &ClusterDeployConfig, registry_port: Option<u16>, kubeconfig_path: &Path, config_dir: &Path, cancel: &CancellationToken) -> Result<ClusterDeployState>: (1) Resolve context and manifests paths relative to config_dir. (2) Build image tag: if registry enabled, use `localhost:{port}/{name}:{unix_timestamp}`, else use `devrig-{name}:latest`. (3) Docker build: shell out to `docker build -t {tag} -f {dockerfile} .` with current_dir set to context path. Check cancellation between steps. (4) If registry enabled: shell out to `docker push {tag}`. (5) kubectl apply: shell out to `kubectl apply -f {manifests_dir}` with KUBECONFIG env set. (6) Return ClusterDeployState with image_tag and current timestamp. Implement async run_rebuild(name, deploy_config, registry_port, kubeconfig_path, config_dir, cancel) -> Result<()>: same as run_deploy but after applying manifests, also runs `kubectl rollout restart deployment/{name}` to force pod update. Each long-running subprocess step uses tokio::select! to race against cancel token. Register the module in src/cluster/mod.rs.",
+    "files": ["src/cluster/deploy.rs", "src/cluster/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [6, 7]
+  },
+  {
+    "id": 9,
+    "name": "Implement file watcher for cluster deploys",
+    "description": "Create src/cluster/watcher.rs implementing file watching with debounced rebuild triggers. Implement async start_watchers(deploys: &BTreeMap<String, ClusterDeployConfig>, registry_port: Option<u16>, kubeconfig_path: PathBuf, config_dir: PathBuf, cancel: CancellationToken, tracker: &TaskTracker) -> Result<()>: for each deploy with watch=true, spawn a watcher task. Each watcher task: (1) Create a tokio mpsc channel. (2) Create a notify-debouncer-mini Debouncer with 500ms timeout, sending DebouncedEvents to the mpsc channel via a bridge closure. (3) Watch the deploy's context directory recursively (notify::RecursiveMode::Recursive). (4) In a loop, select on cancel token or channel receive. On receive, filter events: skip paths containing IGNORED_DIRS (.git, target, node_modules, .devrig, .claude, __pycache__) or IGNORED_EXTENSIONS (.swp, .swo, .tmp, .pyc, .pyo). If any valid events remain, cancel any in-progress rebuild (via a per-deploy CancellationToken child), wait briefly for cancellation, then spawn a new rebuild task calling deploy::run_rebuild(). (5) On cancel, drop the watcher and return. Log rebuild status: file change detected, building, pushing, applying, complete with duration. Register the module in src/cluster/mod.rs.",
+    "files": ["src/cluster/watcher.rs", "src/cluster/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [8]
+  },
+  {
+    "id": 10,
+    "name": "Extend orchestrator with cluster phase",
+    "description": "Extend the Orchestrator in src/orchestrator/mod.rs to include cluster management. Add imports for the new cluster module. In start(): after Phase 3 (infrastructure) and before Phase 4 (resolve & inject), insert Phase 3.5: (1) If config.cluster is Some and the launch_order contains ClusterDeploy resources (or the cluster section is present), create K3dManager. (2) Call k3d_mgr.create_cluster() (idempotent — checks if already exists). (3) Call k3d_mgr.write_kubeconfig(). (4) If registry enabled, call registry::get_registry_port() and registry::wait_for_registry(). (5) For each ClusterDeploy in launch_order (in dependency order), call deploy::run_deploy(). (6) Save ClusterState to project state. (7) Start file watchers via watcher::start_watchers(). In stop(): cancel watchers (via the main cancel token which propagates). Leave the k3d cluster running for fast restart. In delete(): after stop, if cluster state exists, call k3d_mgr.delete_cluster() which runs `k3d cluster delete` and removes .devrig/kubeconfig. Update the state saving to include cluster state. The InfraManager must be created if cluster is present (cluster needs the network even if no native infra). Update the has_docker check to also be true when cluster config is present.",
+    "files": ["src/orchestrator/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [5, 6, 7, 8, 9]
+  },
+  {
+    "id": 11,
+    "name": "Add CLI commands for cluster and kubectl",
+    "description": "Extend the CLI in src/cli.rs with two new command variants: (1) Cluster { command: ClusterCommands } — with ClusterCommands enum having Create, Delete, and Kubeconfig variants. (2) Kubectl { args: Vec<String> } — with `#[command(name = \"kubectl\", alias = \"k\")]` and `#[arg(trailing_var_arg = true, allow_hyphen_values = true)]` on args. Create src/commands/cluster.rs implementing handlers: run_create() loads config, creates K3dManager, calls create_cluster() + write_kubeconfig(). run_delete() loads config, creates K3dManager, calls delete_cluster(). run_kubeconfig() loads state, prints kubeconfig path. run_kubectl(args) loads state, reads kubeconfig path, spawns `kubectl` with KUBECONFIG env set and passes all args through, inheriting stdin/stdout/stderr for interactive use. Register the module in src/commands/mod.rs. Add dispatch in src/main.rs for both Cluster and Kubectl commands.",
+    "files": ["src/cli.rs", "src/commands/cluster.rs", "src/commands/mod.rs", "src/main.rs"],
+    "validation": "cargo build && cargo run -- --help",
+    "depends_on": [6]
+  },
+  {
+    "id": 12,
+    "name": "Extend UI summary and doctor for cluster",
+    "description": "Extend print_startup_summary() in src/ui/summary.rs to display cluster information. The summary should show a 'Cluster' section after Infrastructure, listing the cluster name, status, and each deployed service with a watch indicator. Format: cluster name with status, then indented deploy names with image reference and '(watching)' tag if watch=true. Add a 'Use: devrig k get pods' hint line. Update RunningService or add a new ClusterSummary struct to pass cluster info to the summary printer. Extend doctor.rs in src/commands/doctor.rs: add a k3d check that runs `k3d version`, parses the output to extract the version string, reports whether k3d v5.x is installed. Report version or 'not found'.",
+    "files": ["src/ui/summary.rs", "src/commands/doctor.rs"],
+    "validation": "cargo build",
+    "depends_on": [6]
+  },
+  {
+    "id": 13,
+    "name": "Extend template interpolation for cluster vars",
+    "description": "Extend build_template_vars() in src/config/interpolate.rs to include cluster variables. If config.cluster is Some, add: 'cluster.name' -> resolved cluster name (config.cluster.name or \"{project.name}-dev\"). This allows template expressions like `{{ cluster.name }}` in service env vars. No other cluster template vars are needed for v0.3.",
+    "files": ["src/config/interpolate.rs"],
+    "validation": "cargo test config::interpolate",
+    "depends_on": [2]
+  },
+  {
+    "id": 14,
+    "name": "Add test infrastructure for k3d",
+    "description": "Extend tests/common/mod.rs with k3d-specific test helpers. Add k3d_available() -> bool: attempts to run `k3d version` and returns true if it succeeds. Add async k3d_cleanup(cluster_name: &str): runs `k3d cluster delete {name}` ignoring errors, as a fallback cleanup. Add async wait_for_pod_running(kubeconfig: &Path, label_or_name: &str, timeout: Duration) -> bool: polls `kubectl get pods {label_or_name} --kubeconfig {path} -o jsonpath='{.items[0].status.phase}'` (or `'{.status.phase}'` for named pods) until output contains 'Running' or timeout expires. Add kubeconfig_checksum(path: &Path) -> Option<String>: reads ~/.kube/config and returns SHA-256 hex if it exists, None otherwise. Useful for asserting the global kubeconfig is untouched.",
+    "files": ["tests/common/mod.rs"],
+    "validation": "cargo build --features integration",
+    "depends_on": [1]
+  },
+  {
+    "id": 15,
+    "name": "Implement cluster lifecycle integration test",
+    "description": "Create tests/integration/cluster_lifecycle.rs implementing the full cluster lifecycle test. The test: (1) Skip if k3d not available. (2) Compute SHA-256 checksum of ~/.kube/config (if exists). (3) Create a TestProject with devrig.toml containing [project], [cluster] with registry=true, and [cluster.deploy.echo] pointing to a minimal Docker context (create a temp Dockerfile: FROM alpine, CMD [\"sleep\", \"3600\"]) and a manifests dir (create a minimal deployment.yaml). (4) Create the Orchestrator and call start(). (5) Assert: k3d cluster exists (`k3d cluster list -o json`). (6) Assert: .devrig/kubeconfig file exists. (7) Assert: pod is running (wait_for_pod_running with 60s timeout). (8) Assert: `kubectl get pods --kubeconfig .devrig/kubeconfig` succeeds. (9) Assert: ~/.kube/config checksum unchanged. (10) Call orchestrator.delete(). (11) Assert: k3d cluster no longer exists. (12) Assert: .devrig/kubeconfig removed. (13) Assert: no Docker containers with the test slug label remain. Cleanup: k3d_cleanup() and docker_cleanup() in a Drop guard or scopeguard. Register the test module in tests/integration.rs (or tests/integration/mod.rs).",
+    "files": ["tests/integration/cluster_lifecycle.rs", "tests/integration.rs"],
+    "validation": "cargo test --features integration cluster_lifecycle -- --nocapture",
+    "depends_on": [10, 14]
+  },
+  {
+    "id": 16,
+    "name": "Implement registry push/pull integration test",
+    "description": "Create tests/integration/cluster_registry.rs implementing registry validation. The test: (1) Skip if k3d not available. (2) Create TestProject with [cluster] registry=true and [cluster.deploy.hello] with a Docker context that builds FROM alpine, CMD [\"echo\", \"hello\"] and a deployment manifest referencing the registry image. (3) Start via orchestrator. (4) Assert: registry container exists and is running. (5) Assert: the hello pod started successfully (image was pulled from the local registry). (6) Cleanup via delete + k3d_cleanup fallback. Register in tests/integration.rs.",
+    "files": ["tests/integration/cluster_registry.rs", "tests/integration.rs"],
+    "validation": "cargo test --features integration cluster_registry -- --nocapture",
+    "depends_on": [15]
+  },
+  {
+    "id": 17,
+    "name": "Implement network bridge integration test",
+    "description": "Create tests/integration/cluster_network.rs implementing network bridge connectivity validation. The test: (1) Skip if k3d not available. (2) Create TestProject with [infra.redis] (redis:7-alpine, port auto, ready_check tcp) AND [cluster] with registry=true AND [cluster.deploy.checker] where checker is a pod that runs a script to TCP connect to the redis container name (devrig-{slug}-redis on port 6379). The checker Docker context: FROM alpine, RUN apk add --no-cache netcat-openbsd, CMD [\"nc\", \"-zv\", \"devrig-{slug}-redis\", \"6379\"]. The manifest: a Job (not Deployment) with restartPolicy: Never. (3) Start via orchestrator. (4) Assert: redis infra container is running. (5) Assert: checker job completed successfully (pod status Succeeded or exit code 0). This proves DNS resolution and network connectivity from cluster pods to infra containers on the shared network. (6) Cleanup. Register in tests/integration.rs.",
+    "files": ["tests/integration/cluster_network.rs", "tests/integration.rs"],
+    "validation": "cargo test --features integration cluster_network -- --nocapture",
+    "depends_on": [15]
+  },
+  {
+    "id": 18,
+    "name": "Write cluster setup guide",
+    "description": "Create docs/guides/cluster-setup.md covering: Prerequisites (Docker, k3d v5.x, kubectl), Configuration (full [cluster] reference with examples), Registry (how it works, image naming conventions for manifests: `k3d-devrig-{slug}-reg:{port}/{name}:latest`), File watching (how watch=true triggers rebuild, debounce behavior, ignored directories), Network connectivity (how pods reach infra containers by Docker container name, connectivity directions table), CLI commands (devrig cluster create/delete/kubeconfig, devrig kubectl/k), Troubleshooting (common issues: k3d not found, port conflicts, slow startup, registry push failures). Keep it practical with copy-pasteable examples.",
+    "files": ["docs/guides/cluster-setup.md"],
+    "validation": "test -f docs/guides/cluster-setup.md && wc -l docs/guides/cluster-setup.md",
+    "depends_on": []
+  },
+  {
+    "id": 19,
+    "name": "Write kubeconfig isolation architecture doc",
+    "description": "Create docs/architecture/kubeconfig-isolation.md covering: Why devrig never touches ~/.kube/config, How k3d flags enforce isolation (--kubeconfig-update-default=false, --kubeconfig-switch-context=false), Where the kubeconfig lives (.devrig/kubeconfig), How devrig kubectl/k sets KUBECONFIG, How to export for direct kubectl access (export KUBECONFIG=$(devrig cluster kubeconfig)), Lifecycle (created on cluster create, removed on cluster delete), Integration test verification (checksum comparison). Follow the existing ADR-like format in docs/architecture/.",
+    "files": ["docs/architecture/kubeconfig-isolation.md"],
+    "validation": "test -f docs/architecture/kubeconfig-isolation.md && wc -l docs/architecture/kubeconfig-isolation.md",
+    "depends_on": []
+  },
+  {
+    "id": 20,
+    "name": "Update configuration guide with cluster sections",
+    "description": "Update docs/guides/configuration.md to add the [cluster] and [cluster.deploy.*] configuration sections. Add: [cluster] section reference with all fields (name, agents, ports, registry), [cluster.deploy.*] section reference with all fields (context, dockerfile, manifests, watch, depends_on), example devrig.toml with cluster configuration, CLI commands reference for cluster management (devrig cluster create/delete/kubeconfig, devrig kubectl, devrig k). Follow the existing documentation style and structure. Add cluster-related template variables ({{ cluster.name }}).",
+    "files": ["docs/guides/configuration.md"],
+    "validation": "test -f docs/guides/configuration.md",
+    "depends_on": [18, 19]
+  }
+]

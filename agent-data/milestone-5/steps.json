@@ -1,0 +1,152 @@
+[
+  {
+    "id": 1,
+    "name": "Create SKILL.md",
+    "description": "Create the skill/claude-code/SKILL.md file at the project root. This is the Claude Code skill that ships with devrig. It must include:\n\n1. YAML frontmatter with:\n   - name: devrig\n   - description: comprehensive trigger description covering service health, errors, performance, traces, logs, metrics, debugging, slow requests\n   - allowed-tools: Bash(devrig *)\n\n2. Markdown body (under 300 lines) with:\n   - Available commands section covering all devrig query subcommands (traces, trace, logs, metrics, status, related)\n   - Service management commands (devrig ps, devrig restart, devrig env, devrig k)\n   - Output format notes (NDJSON default, --format json-pretty for readable output)\n   - Three workflow guides:\n     a. Debugging performance issues (slow traces → span detail → related → logs)\n     b. Investigating errors (error traces → error logs → cross-reference with related)\n     c. Checking system health (status → metrics → warn/error logs)\n\nThe file must reference only real devrig CLI subcommands. Every command example must use the actual flag names from src/cli.rs (e.g., --service, --status, --min-duration, --level, --search, --trace-id, --format, --limit, --last).",
+    "files": ["skill/claude-code/SKILL.md"],
+    "validation": "test -f skill/claude-code/SKILL.md && head -5 skill/claude-code/SKILL.md | grep -q 'name: devrig'",
+    "depends_on": []
+  },
+  {
+    "id": 2,
+    "name": "Extend config model with AddonConfig",
+    "description": "Add addon configuration types to src/config/model.rs:\n\n1. Create AddonConfig enum with #[serde(tag = \"type\")]:\n   - Helm variant: chart (String), repo (String), namespace (String), version (Option<String>), values (BTreeMap<String, toml::Value>), port_forward (BTreeMap<u16, String>)\n   - Manifest variant: path (String), namespace (Option<String>), port_forward (BTreeMap<u16, String>)\n   - Kustomize variant: path (String), namespace (Option<String>), port_forward (BTreeMap<u16, String>)\n\n2. Add `addons: BTreeMap<String, AddonConfig>` to ClusterConfig with #[serde(default)] for backwards compatibility.\n\n3. AddonConfig must derive Debug, Clone, Deserialize, Serialize, PartialEq.\n\n4. Add Serialize derive to toml::Value import if needed (toml::Value already implements Serialize).\n\n5. Add unit tests:\n   - parse_addon_helm_config: Parse a full [cluster.addons.traefik] with type=\"helm\", chart, repo, namespace, values, port_forward\n   - parse_addon_manifest_config: Parse [cluster.addons.my-tool] with type=\"manifest\"\n   - parse_addon_kustomize_config: Parse [cluster.addons.overlay] with type=\"kustomize\"\n   - parse_cluster_without_addons: Existing cluster config still parses (backwards compat)\n   - parse_addon_port_forward_map: Verify port_forward = { 9000 = \"svc/traefik:9000\" } parses correctly\n   - parse_addon_with_values: Verify values with mixed types (string, bool, int) parse correctly",
+    "files": ["src/config/model.rs"],
+    "validation": "cargo test config::model::tests -- --quiet",
+    "depends_on": []
+  },
+  {
+    "id": 3,
+    "name": "Add addon validation rules",
+    "description": "Extend src/config/validate.rs with addon-specific validation:\n\n1. Add new ConfigDiagnostic variants:\n   - EmptyAddonChart: addon has type=helm but empty chart string\n   - EmptyAddonRepo: addon has type=helm but empty repo string\n   - EmptyAddonNamespace: addon has type=helm but empty namespace string\n   - EmptyAddonPath: addon has type=manifest or kustomize but empty path string\n   - AddonPortConflict: addon port_forward local port conflicts with service/infra/dashboard port\n   - DuplicateAddonPort: two addons use the same local port_forward port\n   - AddonNameConflict: addon name conflicts with a cluster.deploy name\n\n2. In the validate() function, iterate over cluster.addons (if cluster is Some) and:\n   - Check non-empty required fields per variant\n   - Collect all addon port_forward local ports and check against the existing port conflict detection\n   - Check addon names don't duplicate deploy names\n\n3. Add unit tests:\n   - validate_addon_empty_chart: Helm addon with empty chart produces error\n   - validate_addon_port_conflict_with_service: Addon port_forward port same as service port\n   - validate_addon_name_conflict_with_deploy: Addon and deploy share a name\n   - validate_valid_addon_config: Valid addon config passes validation",
+    "files": ["src/config/validate.rs"],
+    "validation": "cargo test config::validate::tests -- --quiet",
+    "depends_on": [2]
+  },
+  {
+    "id": 4,
+    "name": "Extend state model with AddonState",
+    "description": "Extend src/orchestrator/state.rs:\n\n1. Add AddonState struct:\n   ```rust\n   #[derive(Debug, Clone, Serialize, Deserialize)]\n   pub struct AddonState {\n       pub addon_type: String,\n       pub namespace: String,\n       pub installed_at: DateTime<Utc>,\n   }\n   ```\n\n2. Add to ClusterState:\n   ```rust\n   #[serde(default)]\n   pub installed_addons: BTreeMap<String, AddonState>,\n   ```\n\nThis uses #[serde(default)] for backwards compatibility with existing state.json files from v0.5.",
+    "files": ["src/orchestrator/state.rs"],
+    "validation": "cargo build && cargo test orchestrator -- --quiet",
+    "depends_on": [2]
+  },
+  {
+    "id": 5,
+    "name": "Implement skill install command",
+    "description": "Implement the devrig skill install CLI command:\n\n1. Create src/commands/skill.rs with:\n   - const SKILL_MD: &str = include_str!(\"../../skill/claude-code/SKILL.md\");\n   - pub async fn run_install(global: bool, config_file: Option<&Path>) -> Result<()>\n   - If global: target = home_dir/.claude/skills/devrig/\n   - If not global: target = config_dir/.claude/skills/devrig/ (where config_dir is the directory containing devrig.toml, resolved from config_file or CWD walk)\n   - Create target directory with tokio::fs::create_dir_all\n   - Write SKILL.md to target/SKILL.md\n   - Print success message with target path and example prompt\n   - Idempotent: overwrite existing files on re-install\n\n2. Update src/commands/mod.rs: add `pub mod skill;`\n\n3. Update src/cli.rs:\n   - Add Skill variant to Commands enum with subcommand SkillCommands\n   - SkillCommands::Install { #[arg(long)] global: bool }\n\n4. Update src/main.rs:\n   - Add dispatch for Commands::Skill { command } => match command { SkillCommands::Install { global } => commands::skill::run_install(global, cli.global.config_file.as_deref()).await }\n\nNote: Use dirs::home_dir() or std::env::var(\"HOME\") for the home directory. The dirs crate is not a dependency — use env::var(\"HOME\") which is simpler and already works in the codebase.",
+    "files": ["src/commands/skill.rs", "src/commands/mod.rs", "src/cli.rs", "src/main.rs"],
+    "validation": "cargo build && cargo run -- skill install --help",
+    "depends_on": [1]
+  },
+  {
+    "id": 6,
+    "name": "Add helm to devrig doctor",
+    "description": "Extend src/commands/doctor.rs to check for helm:\n\n1. Add (\"helm\", &[\"version\", \"--short\"]) to the checks array in the run() function.\n\n2. Helm 3 outputs like 'v3.14.0+g3fc9f72' and Helm 4 outputs like 'v4.0.0+g...'.\n\nThis follows the exact same pattern as the existing k3d, kubectl, docker checks.",
+    "files": ["src/commands/doctor.rs"],
+    "validation": "cargo build",
+    "depends_on": []
+  },
+  {
+    "id": 7,
+    "name": "Implement addon lifecycle module",
+    "description": "Create src/cluster/addon.rs with the addon install/uninstall/port-forward lifecycle:\n\n1. Helper function: run_helm() — executes helm with KUBECONFIG env var, captures output, respects CancellationToken. Follow the run_cmd() pattern from src/cluster/deploy.rs.\n\n2. toml_value_to_helm_set(value: &toml::Value) -> String — converts TOML values to helm --set format:\n   - String → the string value\n   - Boolean → \"true\" / \"false\"\n   - Integer → numeric string\n   - Float → numeric string\n   - Array → \"{val1,val2,val3}\"\n\n3. install_helm_addon(name, config, kubeconfig, cancel) -> Result<()>:\n   - helm repo add {name} {repo} --force-update\n   - helm repo update {name}\n   - Build args: helm upgrade --install {name} {chart} --namespace {namespace} --create-namespace --wait --timeout 5m\n   - Add --version if specified\n   - Add --set key=value for each values entry\n   - Run helm with args\n\n4. install_manifest_addon(name, config, kubeconfig, config_dir, cancel) -> Result<()>:\n   - Resolve path relative to config_dir\n   - kubectl apply -f {path} with optional --namespace\n\n5. install_kustomize_addon(name, config, kubeconfig, config_dir, cancel) -> Result<()>:\n   - kubectl apply -k {path} with optional --namespace\n\n6. install_addons(addons, kubeconfig, config_dir, cancel) -> Result<BTreeMap<String, AddonState>>:\n   - Iterate addons in BTreeMap order (alphabetical)\n   - Dispatch to appropriate installer based on variant\n   - Return map of installed addon states\n\n7. uninstall_addons(addons, kubeconfig, cancel) -> Result<()>:\n   - For Helm addons: helm uninstall {name} --namespace {namespace}\n   - For Manifest addons: kubectl delete -f {path}\n   - For Kustomize addons: kubectl delete -k {path}\n   - Errors are logged but don't stop other uninstalls\n\n8. PortForwardManager struct:\n   - tracker: TaskTracker\n   - cancel: CancellationToken\n   - start_port_forwards(addons, kubeconfig) -> spawns a task per port_forward entry\n   - Each task runs a reconnection loop:\n     ```\n     loop {\n         spawn kubectl port-forward --namespace {ns} {target} {local}:{remote} (kill_on_drop=true)\n         select! {\n             exit = child.wait() => { log + backoff + retry }\n             _ = cancel.cancelled() => { kill child; break }\n         }\n     }\n     ```\n   - stop() -> cancel the token\n\n9. Add unit tests for toml_value_to_helm_set:\n   - string value\n   - boolean true/false\n   - integer\n   - float\n   - array of strings\n\n10. Update src/cluster/mod.rs to add `pub mod addon;`",
+    "files": ["src/cluster/addon.rs", "src/cluster/mod.rs"],
+    "validation": "cargo build && cargo test cluster::addon -- --quiet",
+    "depends_on": [2, 4]
+  },
+  {
+    "id": 8,
+    "name": "Integrate addons into orchestrator",
+    "description": "Modify src/orchestrator/mod.rs to wire addon lifecycle into the startup/shutdown phases:\n\n1. In Phase 3.5 (after cluster creation, before service deploy):\n   - After k3d cluster create succeeds\n   - If config.cluster.addons is non-empty:\n     a. Call addon::install_addons() with the addon configs, kubeconfig path, config dir, and cancel token\n     b. Create PortForwardManager and call start_port_forwards()\n     c. Store addon states in cluster_state.installed_addons\n     d. Store PortForwardManager handle for shutdown\n\n2. In stop():\n   - If port_forward_manager exists, call stop()\n   - Leave addons running (cluster is preserved on stop)\n\n3. In delete():\n   - If port_forward_manager exists, call stop()\n   - If cluster has addons, call uninstall_addons() before k3d cluster delete\n\n4. The PortForwardManager must be stored as an Option field on the Orchestrator struct or in a local variable that persists through the watch phase.\n\nKey consideration: The existing orchestrator already tracks the K3dManager. The addon module functions should accept kubeconfig_path and cancel token as parameters, not require the full K3dManager. This keeps the interface clean.",
+    "files": ["src/orchestrator/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [7]
+  },
+  {
+    "id": 9,
+    "name": "Add addons to startup summary",
+    "description": "Modify src/ui/summary.rs to display installed addons in the startup summary:\n\n1. Add an optional addons parameter to print_startup_summary() or create a new print_addon_info() function (following the pattern of print_dashboard_info()).\n\n2. For each addon with port_forward entries, display:\n   - Addon name\n   - Port-forwarded URL(s): http://localhost:{local_port}\n   - Status indicator (● ready)\n\n3. For addons without port_forward, just show the name and status.\n\n4. Example output:\n   ```\n     Addons\n       traefik    http://localhost:9000 (dashboard)  ● ready\n       cert-mgr                                      ● ready\n   ```\n\n5. Call this from the orchestrator after addon installation completes.",
+    "files": ["src/ui/summary.rs", "src/orchestrator/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [8]
+  },
+  {
+    "id": 10,
+    "name": "Implement config API endpoints",
+    "description": "Create src/dashboard/routes/config.rs with three endpoints:\n\n1. GET /api/config:\n   - Read the devrig.toml file from disk (path from DashboardState)\n   - Compute SHA-256 hash of the content\n   - Return JSON: { \"content\": \"...\", \"path\": \"/path/to/devrig.toml\", \"hash\": \"abc123...\" }\n\n2. POST /api/config/validate:\n   - Accept text/plain body with TOML content\n   - Parse with toml::from_str::<DevrigConfig>()\n   - If parse fails, return syntax error with line/column\n   - If parse succeeds, run validate() with the parsed config\n   - Return JSON: { \"valid\": true } or { \"valid\": false, \"errors\": [{\"offset\": N, \"length\": N, \"severity\": \"error\", \"message\": \"...\"}] }\n   - Map miette diagnostic source spans to offset/length in the response\n\n3. PUT /api/config:\n   - Accept JSON body: { \"content\": \"...\", \"hash\": \"...\" }\n   - Validate the content first (reject if invalid)\n   - Read current file, compute hash, compare with request hash\n   - If hash mismatch: return 409 Conflict with { \"error\": \"conflict\", \"current_content\": \"...\", \"current_hash\": \"...\" }\n   - Create backup: devrig.toml.bak\n   - Write atomically: write to .tmp, rename\n   - Return 200 with { \"hash\": \"new_hash\" }\n\n4. Update src/dashboard/routes/mod.rs:\n   - Add `pub mod config;`\n   - Add config routes to api_router()\n   - Extend DashboardState with config_path: PathBuf\n\n5. Update src/dashboard/server.rs:\n   - Accept config_path parameter in start_dashboard_server()\n   - Pass it to DashboardState\n\n6. Update src/orchestrator/mod.rs Phase 4.5:\n   - Pass config_path to start_dashboard_server()\n\nNote: Use sha2::Sha256 (already a dependency) for hashing.",
+    "files": ["src/dashboard/routes/config.rs", "src/dashboard/routes/mod.rs", "src/dashboard/server.rs", "src/dashboard/mod.rs", "src/orchestrator/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [4]
+  },
+  {
+    "id": 11,
+    "name": "Install frontend dependencies",
+    "description": "Update dashboard/package.json to add CodeMirror and smol-toml dependencies, then install:\n\n1. Add to dependencies in dashboard/package.json:\n   - \"solid-codemirror\": \"^2.3.1\"\n   - \"@codemirror/state\": \"^6.5.4\"\n   - \"@codemirror/view\": \"^6.38.8\"\n   - \"@codemirror/language\": \"^6.0.0\"\n   - \"@codemirror/legacy-modes\": \"^6.5.2\"\n   - \"@codemirror/lint\": \"^6.9.4\"\n   - \"@codemirror/theme-one-dark\": \"^6.0.0\"\n   - \"codemirror\": \"^6.0.0\"\n   - \"smol-toml\": \"^1.6.0\"\n\n2. Run `cd dashboard && npm install` to update node_modules and package-lock.json.\n\n3. Verify the build still works: `cd dashboard && npm run build`.",
+    "files": ["dashboard/package.json"],
+    "validation": "cd /home/steve/fj/devrig/dashboard && npm install && npm run build",
+    "depends_on": []
+  },
+  {
+    "id": 12,
+    "name": "Create config editor frontend component",
+    "description": "Create the CodeMirror-based config editor component and view:\n\n1. Create dashboard/src/components/ConfigEditor.tsx:\n   - Import createCodeMirror from solid-codemirror\n   - Import StreamLanguage from @codemirror/language\n   - Import toml from @codemirror/legacy-modes/mode/toml\n   - Import linter, lintGutter from @codemirror/lint\n   - Import oneDark from @codemirror/theme-one-dark\n   - Import basicSetup from codemirror\n   - Import parse from smol-toml for client-side validation\n   - Component accepts props: content (string), onContentChange (callback), diagnostics (array)\n   - Initialize CodeMirror with basicSetup, StreamLanguage.define(toml), oneDark, lintGutter()\n   - Create a linter extension that:\n     a. Calls smol-toml parse() for syntax validation (300ms debounce)\n     b. Maps parse errors to CodeMirror Diagnostic[] with from/to positions\n     c. Also maps server-side diagnostics (from props) to CodeMirror Diagnostics\n   - Use createEditorControlledValue for reactive content updates\n   - Export the component\n\n2. Create dashboard/src/views/ConfigView.tsx:\n   - Fetch config from GET /api/config on mount\n   - Display ConfigEditor with loaded content\n   - On content change:\n     a. Debounce 800ms\n     b. POST /api/config/validate with the content\n     c. Pass validation errors to ConfigEditor as diagnostics\n   - Save button:\n     a. Enabled only when content is valid (no syntax or semantic errors)\n     b. Shows spinner during save\n     c. PUT /api/config with content and hash\n     d. Handle 409 Conflict: show modal asking user to reload or overwrite\n     e. On success: update hash, show success toast\n   - Status bar showing: \"Valid\" (green), \"N errors\" (red), or \"Validating...\" (yellow)\n\n3. Add API functions to dashboard/src/api.ts (or dashboard/src/lib/api.ts):\n   - getConfig(): Promise<{content: string, path: string, hash: string}>\n   - validateConfig(content: string): Promise<{valid: boolean, errors?: DiagnosticInfo[]}>\n   - saveConfig(content: string, hash: string): Promise<{hash: string}>\n\n4. Update dashboard/src/components/Sidebar.tsx:\n   - Add Config nav item: { label: 'Config', icon: '\\u2699', route: '#/config', match: (r) => r.startsWith('/config') }\n\n5. Update dashboard/src/App.tsx:\n   - Import ConfigView\n   - Add Match for routeSegment() === 'config' rendering ConfigView\n   - Add 'config' case to routeSegment() function\n\n6. Rebuild: cd dashboard && npm run build",
+    "files": [
+      "dashboard/src/components/ConfigEditor.tsx",
+      "dashboard/src/views/ConfigView.tsx",
+      "dashboard/src/api.ts",
+      "dashboard/src/components/Sidebar.tsx",
+      "dashboard/src/App.tsx"
+    ],
+    "validation": "cd /home/steve/fj/devrig/dashboard && npm run build",
+    "depends_on": [10, 11]
+  },
+  {
+    "id": 13,
+    "name": "Skill install integration tests",
+    "description": "Create tests/integration/skill_install.rs with integration tests:\n\n1. skill_install_project_local:\n   - Create a TempDir with a minimal devrig.toml\n   - Run `devrig skill install -f {dir}/devrig.toml` via Command\n   - Assert dir/.claude/skills/devrig/SKILL.md exists\n   - Read the file and assert it contains 'devrig' and 'query traces'\n\n2. skill_install_global:\n   - Create a TempDir for HOME\n   - Create a TempDir with a minimal devrig.toml\n   - Run `devrig skill install --global -f {dir}/devrig.toml` with HOME env override\n   - Assert HOME/.claude/skills/devrig/SKILL.md exists\n\n3. skill_install_idempotent:\n   - Install twice to the same location\n   - Assert second install succeeds\n   - Assert content is identical between runs\n\n4. skill_commands_are_valid:\n   - Read the embedded SKILL.md content (or the file from skill/claude-code/SKILL.md)\n   - Extract all `devrig <subcommand>` patterns via regex\n   - For each unique subcommand, run `devrig {subcommand} --help` and assert exit code 0 or the stderr doesn't contain 'unrecognized'\n\n5. Update tests/integration.rs to add:\n   ```rust\n   #[path = \"integration/skill_install.rs\"]\n   mod skill_install;\n   ```",
+    "files": ["tests/integration/skill_install.rs", "tests/integration.rs"],
+    "validation": "cargo test --features integration skill_install -- --quiet",
+    "depends_on": [5]
+  },
+  {
+    "id": 14,
+    "name": "Addon lifecycle integration tests",
+    "description": "Create tests/integration/addon_lifecycle.rs with integration tests:\n\n1. addon_helm_install_and_cleanup:\n   - Guard: skip if k3d or helm not available (k3d_available() && helm_available())\n   - Create a devrig.toml with [cluster] and [cluster.addons.traefik] configured as a Helm addon:\n     ```toml\n     [cluster]\n     registry = true\n     \n     [cluster.addons.traefik]\n     type = \"helm\"\n     chart = \"traefik/traefik\"\n     repo = \"https://traefik.github.io/charts\"\n     namespace = \"traefik\"\n     port_forward = { 9000 = \"svc/traefik:9000\" }\n     \n     [cluster.addons.traefik.values]\n     \"ports.web.nodePort\" = 32080\n     ```\n   - Use tokio::time::timeout(Duration::from_secs(300)) for the whole test\n   - Start devrig (spawn child process)\n   - Wait for cluster to be ready (poll kubectl get nodes)\n   - Verify Traefik namespace exists (kubectl get ns traefik)\n   - Verify Traefik pods are running (kubectl get pods -n traefik)\n   - Verify port-forward works: wait_for_port(9000) with timeout\n   - Send delete signal, verify port 9000 is released\n   - Cleanup: k3d_cleanup_sync()\n\n2. Add helm_available() helper to tests/common/mod.rs:\n   - Run `helm version --short`, return true if exit code 0\n\n3. Update tests/integration.rs to add:\n   ```rust\n   #[path = \"integration/addon_lifecycle.rs\"]\n   mod addon_lifecycle;\n   ```",
+    "files": ["tests/integration/addon_lifecycle.rs", "tests/common/mod.rs", "tests/integration.rs"],
+    "validation": "cargo build --features integration",
+    "depends_on": [8]
+  },
+  {
+    "id": 15,
+    "name": "Config editor E2E tests",
+    "description": "Create e2e/dashboard/config-editor.test.ts with Playwright tests:\n\n1. config_editor_loads_current_config:\n   - Navigate to /#/config\n   - Wait for .cm-editor to be visible (timeout: 5000ms)\n   - Verify cm-content contains '[project]' (the TOML section header)\n\n2. shows_validation_error_for_invalid_config:\n   - Navigate to /#/config\n   - Wait for editor to load\n   - Select all text (Ctrl+A) and type invalid TOML: '[project\\nname = invalid'\n   - Wait 1500ms for debounced validation\n   - Assert .cm-lint-error markers are visible\n\n3. save_button_disabled_when_invalid:\n   - Navigate to /#/config\n   - Type invalid content\n   - Assert save button is disabled (has disabled attribute or disabled class)\n\n4. config_nav_item_visible:\n   - Navigate to /\n   - Assert sidebar contains a 'Config' link\n   - Click it\n   - Assert URL hash is #/config\n\nNote: CodeMirror renders content in <div class=\"cm-content\"> not a <textarea>. Use keyboard.press('Control+a') + keyboard.type() instead of fill().",
+    "files": ["e2e/dashboard/config-editor.test.ts"],
+    "validation": "cd /home/steve/fj/devrig/e2e && npx playwright test --list 2>/dev/null | grep -c config-editor",
+    "depends_on": [12]
+  },
+  {
+    "id": 16,
+    "name": "Create claude-code-skill guide",
+    "description": "Create docs/guides/claude-code-skill.md:\n\n1. Overview section: what the devrig skill is and what it enables\n2. Installation section:\n   - Project-local: `devrig skill install` (preferred for team projects)\n   - Global: `devrig skill install --global`\n   - Verify: check .claude/skills/devrig/SKILL.md exists\n3. What Claude can do section:\n   - Investigate performance issues\n   - Debug errors and failures\n   - Check system health\n   - Correlate traces, logs, and metrics\n   - Inspect service configuration\n4. Example prompts section:\n   - \"Why is the API slow?\"\n   - \"What's erroring in the worker service?\"\n   - \"Show me what happened at 10:30am\"\n   - \"Is postgres healthy?\"\n   - \"What services are running and are there any errors?\"\n5. How it works section:\n   - Skill discovery mechanism (frontmatter loaded at startup)\n   - Commands Claude uses (devrig query, devrig ps, devrig env)\n   - Auto-approval via allowed-tools",
+    "files": ["docs/guides/claude-code-skill.md"],
+    "validation": "test -f docs/guides/claude-code-skill.md",
+    "depends_on": [1]
+  },
+  {
+    "id": 17,
+    "name": "Update configuration guide with addons",
+    "description": "Update docs/guides/configuration.md to add the [cluster.addons.*] section:\n\n1. Add a 'Cluster Addons' section after the existing [cluster.deploy.*] section\n2. Document the three addon types with examples:\n   - Helm: full example with chart, repo, namespace, values, version, port_forward\n   - Manifest: example with path and namespace\n   - Kustomize: example with path\n3. Document the port_forward field syntax\n4. Document the values field and how TOML values map to helm --set\n5. Document addon lifecycle:\n   - Installed during cluster creation\n   - Preserved across stop/start\n   - Removed on delete\n6. Add a Traefik example as the recommended ingress addon\n7. Document the addon installation order (alphabetical by key name)\n8. Mention the devrig doctor check for helm",
+    "files": ["docs/guides/configuration.md"],
+    "validation": "grep -q 'cluster.addons' docs/guides/configuration.md",
+    "depends_on": [2]
+  },
+  {
+    "id": 18,
+    "name": "Final build verification and formatting",
+    "description": "Run the complete build and quality checks:\n\n1. cargo fmt -- apply formatting to all files\n2. cargo clippy -- -D warnings -- fix any warnings\n3. cargo build -- full build\n4. cargo test -- run all unit tests (should be 211+ with new addon tests)\n5. cd dashboard && npm run build -- rebuild frontend with config editor\n6. Verify all new files exist:\n   - skill/claude-code/SKILL.md\n   - src/commands/skill.rs\n   - src/cluster/addon.rs\n   - src/dashboard/routes/config.rs\n   - dashboard/src/components/ConfigEditor.tsx\n   - dashboard/src/views/ConfigView.tsx\n   - e2e/dashboard/config-editor.test.ts\n   - tests/integration/skill_install.rs\n   - tests/integration/addon_lifecycle.rs\n   - docs/guides/claude-code-skill.md\n7. Verify backwards compatibility: existing configs without addons still parse and validate",
+    "files": [],
+    "validation": "cargo fmt --check && cargo clippy -- -D warnings && cargo build && cargo test -- --quiet && cd /home/steve/fj/devrig/dashboard && npm run build",
+    "depends_on": [3, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 17]
+  }
+]

@@ -1,0 +1,26 @@
+{
+  "milestone": "v0.1",
+  "passed": true,
+  "checks": [
+    { "name": "cargo fmt", "passed": true, "output": "Exit code 0. No formatting differences." },
+    { "name": "cargo clippy", "passed": true, "output": "Exit code 0. No warnings or errors." },
+    { "name": "cargo build", "passed": true, "output": "Compiling devrig v0.1.0. Exit code 0." },
+    { "name": "cargo test", "passed": true, "output": "45 passed; 0 failed; 0 ignored. Exit code 0." },
+    { "name": "config parsing tests", "passed": true, "output": "29 passed; 0 failed; 0 ignored. Exit code 0." },
+    { "name": "validation tests", "passed": true, "output": "7 passed; 0 failed; 0 ignored. Exit code 0." },
+    { "name": "graph tests", "passed": true, "output": "8 passed; 0 failed; 0 ignored. Exit code 0." },
+    { "name": "identity tests", "passed": true, "output": "4 passed; 0 failed; 0 ignored. Exit code 0." },
+    { "name": "resolution tests", "passed": true, "output": "6 passed; 0 failed; 0 ignored. Exit code 0." },
+    { "name": "CLI help output", "passed": true, "output": "All 3 help commands (--help, start --help, ps --help) exit 0 with meaningful output." },
+    { "name": "integration tests", "passed": true, "output": "9 passed; 0 failed; 0 ignored. Exit code 0." },
+    { "name": "cleanup verification", "passed": true, "output": "No orphaned devrig-test processes found." },
+    { "name": "README.md", "passed": true, "output": "128 lines, contains quickstart, example config, and CLI reference." },
+    { "name": "ADR documents", "passed": true, "output": "All 8 ADRs present with Context, Decision, and Consequences sections." },
+    { "name": "architecture docs", "passed": true, "output": "All 4 architecture documents present." },
+    { "name": "guide docs", "passed": true, "output": "All 3 guides present." },
+    { "name": "module structure", "passed": true, "output": "All 21 source modules present." },
+    { "name": "test structure", "passed": true, "output": "tests/common/mod.rs and tests/integration/ directory present." },
+    { "name": "dependencies", "passed": true, "output": "All 14 required crates present in Cargo.toml." }
+  ],
+  "failures": []
+}

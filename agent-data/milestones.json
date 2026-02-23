@@ -1,0 +1,195 @@
+{
+  "project": {
+    "name": "devrig",
+    "language": "rust"
+  },
+  "milestones": [
+    {
+      "id": 0,
+      "version": "v0.1",
+      "name": "Local process orchestration",
+      "features": [
+        "Parse devrig.toml with [project], [services.*], [env]",
+        "-f flag for alternate config files",
+        "Project identity (name + path hash) for multi-instance isolation",
+        "Directory-aware config discovery (walk up directory tree)",
+        "devrig start / stop / delete for local processes",
+        "Startup summary with service URLs, project slug, and status",
+        "Port collision detection with clear error messages identifying the conflicting project",
+        "Dependency ordering with depends_on",
+        "Unified colored log output",
+        "devrig ps status display, devrig ps --all for cross-project discovery",
+        "devrig init scaffolding",
+        "devrig doctor dependency checker"
+      ],
+      "tests": [
+        "Unit tests for config parsing",
+        "Unit tests for dependency resolution",
+        "Unit tests for project identity hashing",
+        "Integration tests for start/stop/delete lifecycle",
+        "Integration tests for -f flag",
+        "Integration tests for process crash recovery",
+        "Integration tests for port verification",
+        "Integration tests for cleanup assertions",
+        "Multi-instance tests: two projects running simultaneously with no cross-talk",
+        "Multi-instance tests: port collision detection",
+        "Multi-instance tests: ps --all discovery",
+        "Multi-instance tests: label-scoped cleanup",
+        "Multi-instance tests: directory tree config discovery"
+      ],
+      "docs": [
+        "README.md (quickstart, demo placeholder, minimal example)",
+        "docs/adr/001-toml-only.md",
+        "docs/adr/002-no-profiles.md",
+        "docs/adr/003-isolated-kubeconfig.md",
+        "docs/adr/004-compose-interop.md",
+        "docs/adr/005-traefik-over-nginx.md",
+        "docs/adr/006-in-memory-otel.md",
+        "docs/adr/007-agent-browser-testing.md",
+        "docs/adr/008-multi-instance-isolation.md",
+        "docs/architecture/overview.md",
+        "docs/architecture/config-model.md",
+        "docs/architecture/dependency-graph.md",
+        "docs/architecture/multi-instance.md",
+        "docs/guides/getting-started.md",
+        "docs/guides/configuration.md",
+        "docs/guides/contributing.md"
+      ],
+      "dependencies": []
+    },
+    {
+      "id": 1,
+      "version": "v0.2",
+      "name": "Infrastructure containers",
+      "features": [
+        "[infra.*] blocks with Docker container lifecycle",
+        "Image pulling, volume management",
+        "Ready check system (all built-in strategies: pg_isready, cmd, http, tcp, log)",
+        "Init script execution and tracking",
+        "Service discovery: DEVRIG_<NAME>_HOST, _PORT, _URL for all services and infra",
+        "URL generation (postgres://, redis://, http://) from config + credentials",
+        "devrig env <service> command for inspecting resolved vars",
+        "Auto port selection (port = \"auto\") with state persistence",
+        "Template expression resolution ({{ infra.postgres.port }}, {{ services.api.port }})",
+        "devrig exec and devrig reset",
+        "Docker network creation and management",
+        "[compose] interop — delegate infra to existing docker-compose.yml",
+        "Compose + native infra coexistence on shared network"
+      ],
+      "tests": [
+        "Integration tests for Postgres/Redis lifecycle (start, ready check, connect, init SQL, stop, delete)",
+        "Service discovery tests: verify DEVRIG_* vars injected into processes",
+        "Service discovery tests: URL generation correctness",
+        "Service discovery tests: devrig env output",
+        "Service discovery tests: auto port persistence across stop/start",
+        "Compose interop tests",
+        "Volume cleanup assertions",
+        "Network isolation verification",
+        "Leaked resource checks"
+      ],
+      "docs": [
+        "docs/architecture/service-discovery.md",
+        "docs/guides/compose-migration.md",
+        "Update docs/guides/configuration.md with [infra.*], [compose], service discovery vars, and template expressions"
+      ],
+      "dependencies": [0]
+    },
+    {
+      "id": 2,
+      "version": "v0.3",
+      "name": "k3d cluster support",
+      "features": [
+        "[cluster] configuration",
+        "k3d cluster create/delete lifecycle",
+        "Local registry support",
+        "[cluster.deploy.*] with build + manifest apply",
+        "File watching for cluster-deployed services",
+        "Network bridging between Docker network and cluster"
+      ],
+      "tests": [
+        "Integration tests for full cluster lifecycle (create, deploy, verify pod running, devrig k get pods works, delete cluster, verify no k3d resources remain, verify .devrig/kubeconfig removed, verify ~/.kube/config untouched)",
+        "Registry push/pull validation",
+        "Network bridge connectivity between infra containers and cluster pods"
+      ],
+      "docs": [
+        "docs/guides/cluster-setup.md",
+        "docs/architecture/kubeconfig-isolation.md",
+        "Update docs/guides/configuration.md with [cluster] and [cluster.deploy.*]"
+      ],
+      "dependencies": [0, 1]
+    },
+    {
+      "id": 3,
+      "version": "v0.4",
+      "name": "Developer experience polish",
+      "features": [
+        "devrig validate with helpful error messages",
+        "Config file watching (auto-restart on devrig.toml changes)",
+        "Crash recovery with exponential backoff",
+        "devrig logs filtering, search, and export",
+        "Shell completions (bash, zsh, fish)",
+        "Colored, structured terminal UI (service status dashboard)"
+      ],
+      "tests": [],
+      "docs": [],
+      "dependencies": [0, 1, 2]
+    },
+    {
+      "id": 4,
+      "version": "v0.5",
+      "name": "Observability + Dashboard",
+      "features": [
+        "Axum backend serving SolidJS + Solid UI frontend",
+        "In-process OTLP receiver (gRPC + HTTP)",
+        "In-memory ring buffer storage for traces, metrics, logs",
+        "Auto-injection of OTEL_EXPORTER_OTLP_ENDPOINT into services",
+        "Dashboard: overview, trace waterfall, metric charts, structured log viewer",
+        "Real-time updates via WebSocket",
+        "devrig query CLI for machine-readable observability data (JSON)",
+        "REST API mirroring CLI query capabilities",
+        "Service management from the UI (start/stop/restart)"
+      ],
+      "tests": [
+        "Integration tests for OTLP ingest (send spans/metrics/logs, verify ring buffer contents via query CLI)",
+        "Agent-browser E2E tests for dashboard overview status",
+        "Agent-browser E2E tests for trace waterfall rendering",
+        "Agent-browser E2E tests for metric chart discovery",
+        "Agent-browser E2E tests for log filtering",
+        "Agent-browser E2E tests for trace correlation navigation",
+        "Agent-browser E2E tests for Cmd+K palette",
+        "Agent-browser E2E tests for dark/light toggle",
+        "Agent-browser E2E tests for real-time WebSocket push"
+      ],
+      "docs": [
+        "docs/architecture/otel-storage.md",
+        "docs/api/rest-api.md",
+        "docs/api/query-cli.md",
+        "Update docs/guides/configuration.md with [dashboard] and [dashboard.otel]"
+      ],
+      "dependencies": [0, 1, 2, 3]
+    },
+    {
+      "id": 5,
+      "version": "v0.6",
+      "name": "Claude Code skill + Cluster addons",
+      "features": [
+        "Claude Code skill: skill/claude-code/SKILL.md with full query workflow guidance",
+        "devrig skill install (project-local to .claude/skills/) and devrig skill install --global (~/.claude/skills/)",
+        "[cluster.addons.*] with Helm, manifest, and Kustomize support (prefer Traefik over nginx-ingress)",
+        "Automatic port-forwarding for addon UIs",
+        "Config editor with validation in dashboard"
+      ],
+      "tests": [
+        "Integration tests for devrig skill install (verify files copied to correct location, project-local and global)",
+        "Integration tests for addon install/teardown (Traefik Helm chart deploys, port-forward works, cleanup on delete)",
+        "Agent-browser E2E for config editor validation",
+        "Skill validation: run Claude Code with the installed skill against a live devrig instance, verify it can query traces/logs/metrics and produce meaningful analysis"
+      ],
+      "docs": [
+        "docs/guides/claude-code-skill.md — how to install and use the skill, example prompts, what Claude can do with it",
+        "Update docs/guides/configuration.md with [cluster.addons.*]"
+      ],
+      "dependencies": [0, 1, 2, 3, 4]
+    }
+  ]
+}

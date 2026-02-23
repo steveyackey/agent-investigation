@@ -1,0 +1,186 @@
+[
+  {
+    "id": 1,
+    "name": "Add new dependencies to Cargo.toml",
+    "description": "Add bollard 0.20, futures-util 0.3, reqwest 0.12 (with rustls-tls, no default features), and backon 1 to [dependencies] in Cargo.toml. Also add tokio features 'net' (needed for TcpStream::connect in TCP ready checks). Verify the project compiles with `cargo build`.",
+    "files": ["Cargo.toml"],
+    "validation": "cargo build",
+    "depends_on": []
+  },
+  {
+    "id": 2,
+    "name": "Extend config model with infra/compose types",
+    "description": "Extend DevrigConfig in src/config/model.rs with three new optional fields: `infra: BTreeMap<String, InfraConfig>`, `compose: Option<ComposeConfig>`, and `network: Option<NetworkConfig>`. Define InfraConfig with fields: image (String), port (Option<Port>), ports (BTreeMap<String, Port> for named ports like smtp=1025), env (BTreeMap), volumes (Vec<String>), ready_check (Option<ReadyCheck>), init (Vec<String>), depends_on (Vec<String>). Define ReadyCheck as a tagged enum (#[serde(tag = \"type\")]) with variants: PgIsReady, Cmd { command, expect? }, Http { url }, Tcp, Log { pattern (renamed from match via serde) }. Define ComposeConfig with file (String), services (Vec<String>), env_file (Option<String>), ready_checks (BTreeMap<String, ReadyCheck>). Define NetworkConfig (currently just a placeholder struct). Add comprehensive unit tests: parse infra block with single port, parse infra block with named ports, parse ready_check variants (all 5 types), parse compose block, parse config with both infra and services, parse minimal config still works (backwards compatibility), parse InfraConfig with all fields populated.",
+    "files": ["src/config/model.rs"],
+    "validation": "cargo test config::model",
+    "depends_on": [1]
+  },
+  {
+    "id": 3,
+    "name": "Extend config validation for infra and compose",
+    "description": "Extend validate() in src/config/validate.rs to handle the new config sections. Add new ConfigError variants: MissingInfraDependency (service depends on infra name that doesn't exist), DuplicateInfraPort (infra and service share same fixed port), InvalidComposeService (compose.services references unknown service in compose file — validate later at runtime), EmptyImage (infra has empty image string). Validation checks to add: (1) When a service's depends_on references a name, check services OR infra OR compose.services — not just services. The available list should include all three. (2) Check for port conflicts across both services and infra (infra.port and infra.ports values vs service ports). (3) Validate infra image is non-empty. (4) Validate compose.file path is non-empty if compose is present. (5) Include infra nodes in dependency cycle detection. Add unit tests: service depends on infra name (valid), service depends on unknown name (error), infra and service share same port (error), infra with empty image (error), config with infra + services + depends_on across types (valid).",
+    "files": ["src/config/validate.rs"],
+    "validation": "cargo test config::validate",
+    "depends_on": [2]
+  },
+  {
+    "id": 4,
+    "name": "Implement template expression resolution",
+    "description": "Create src/config/interpolate.rs implementing template expression resolution. Use a compiled LazyLock<Regex> for pattern `\\{\\{\\s*([\\w.]+)\\s*\\}\\}`. Implement resolve_template(input: &str, vars: &HashMap<String, String>, field_context: &str) -> Result<String, Vec<TemplateError>>. Use two-pass approach: first validate all references exist, then replace. Define TemplateError::UnresolvedVariable { field, variable }. Implement build_template_vars() that constructs the flat HashMap from config + resolved ports: keys like 'project.name', 'services.api.port', 'infra.postgres.port'. Implement resolve_config_templates() that walks all service env values and resolves templates. Register the module in src/config/mod.rs. Unit tests: basic substitution, multiple substitutions in one string, unresolved variable error, no templates is no-op, whitespace in braces handled, build_template_vars produces correct keys, nested dot paths.",
+    "files": ["src/config/interpolate.rs", "src/config/mod.rs"],
+    "validation": "cargo test config::interpolate",
+    "depends_on": [2]
+  },
+  {
+    "id": 5,
+    "name": "Extend state model for infra and compose",
+    "description": "Extend ProjectState in src/orchestrator/state.rs with new fields: infra (BTreeMap<String, InfraState>), compose_services (BTreeMap<String, ComposeServiceState>), network_name (Option<String>). Define InfraState with fields: container_id (String), container_name (String), port (Option<u16>), port_auto (bool), named_ports (BTreeMap<String, u16>), init_completed (bool), init_completed_at (Option<DateTime<Utc>>). Define ComposeServiceState with: container_id (String), container_name (String), port (Option<u16>). All new fields on ProjectState use #[serde(default)] for backwards compatibility with existing state files. Add a method reset_init(infra_name: &str) that clears init_completed for a specific infra service and saves.",
+    "files": ["src/orchestrator/state.rs"],
+    "validation": "cargo build && cargo test",
+    "depends_on": [1]
+  },
+  {
+    "id": 6,
+    "name": "Extend dependency graph for unified resource types",
+    "description": "Extend DependencyResolver in src/orchestrator/graph.rs to support a unified graph with services, infra, and compose nodes. Add ResourceKind enum { Service, Infra, Compose }. Change from_config() to accept the full DevrigConfig (including infra and compose) and add nodes for all resource types. Infra nodes have no depends_on of their own (they are leaves). Compose services are also leaves. Service depends_on can reference service names, infra names, or compose service names. The start_order() return should include resource kind information — change return type to Vec<(String, ResourceKind)> or provide a separate method to query kind. Update all existing tests to work with the new signature. Add new tests: mixed graph with services and infra, service depends on infra (valid ordering), compose nodes appear before services that depend on them, cycle involving infra reference (should not be possible since infra has no depends_on), infra with depends_on on another infra.",
+    "files": ["src/orchestrator/graph.rs"],
+    "validation": "cargo test orchestrator::graph",
+    "depends_on": [2]
+  },
+  {
+    "id": 7,
+    "name": "Extend port resolution for infra",
+    "description": "Extend src/orchestrator/ports.rs with infra-aware port resolution. Add resolve_port() function that takes a resource key (e.g. 'infra:postgres'), Port config, optional previous InfraState (for sticky auto-ports), and a mutable HashSet<u16> of already-allocated ports. For Fixed ports, return the value. For Auto ports, try to reuse the previous auto-assigned port if available and not in the allocated set, otherwise call find_free_port() excluding the allocated set. Add find_free_port_excluding(allocated: &HashSet<u16>) that loops find_free_port() until it gets one not in the set. Extend check_all_ports() to accept infra configs alongside service configs and check both for conflicts. Update format_port_conflicts() to name infra services clearly.",
+    "files": ["src/orchestrator/ports.rs"],
+    "validation": "cargo build && cargo test",
+    "depends_on": [2, 5]
+  },
+  {
+    "id": 8,
+    "name": "Implement Docker network management",
+    "description": "Create src/infra/network.rs implementing Docker network create/remove/connect. Create src/infra/mod.rs as the module root that re-exports submodules. Implement ensure_network(docker, network_name, labels) that checks if network exists (inspect_network), creates if not (bridge driver). Implement remove_network(docker, network_name) with 404 tolerance. Implement connect_container(docker, network_name, container_id, aliases) to connect a container to the network. Implement resource_labels(slug, service) -> HashMap that generates standard devrig labels (devrig.project, devrig.service, devrig.managed-by). Register the infra module in src/lib.rs.",
+    "files": ["src/infra/mod.rs", "src/infra/network.rs", "src/lib.rs"],
+    "validation": "cargo build",
+    "depends_on": [1]
+  },
+  {
+    "id": 9,
+    "name": "Implement Docker image pulling",
+    "description": "Create src/infra/image.rs implementing image pulling with progress reporting. Implement pull_image(docker, image_ref) that parses the image reference into name:tag (defaulting tag to 'latest'), calls docker.create_image() to get a stream, consumes the stream checking error_detail on each item, and logs progress. Implement check_image_exists(docker, image_ref) -> bool using docker.inspect_image(). Implement pull_images_parallel(docker, images) using tokio::JoinSet to pull multiple images concurrently, skipping those already present locally. Parse image references correctly: 'postgres:16' -> ('postgres', '16'), 'redis' -> ('redis', 'latest'), 'axllent/mailpit:latest' -> ('axllent/mailpit', 'latest').",
+    "files": ["src/infra/image.rs", "src/infra/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [8]
+  },
+  {
+    "id": 10,
+    "name": "Implement Docker container lifecycle",
+    "description": "Create src/infra/container.rs implementing container create/start/stop/remove. Implement create_container(docker, name, config) that creates a container with: project-scoped name (devrig-{slug}-{service}), image, environment variables, port bindings (host port -> container port), volume mounts, network connection, and devrig labels. Implement start_container(docker, id). Implement stop_container(docker, id, timeout) with configurable stop timeout (default 10s). Implement remove_container(docker, id, force) for cleanup. Implement inspect_container(docker, id) wrapper. Implement list_project_containers(docker, slug) that queries containers by label devrig.project={slug}. Handle bollard error patterns: 404 (not found, safe to ignore for idempotent ops), 409 (conflict, container already running).",
+    "files": ["src/infra/container.rs", "src/infra/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [8]
+  },
+  {
+    "id": 11,
+    "name": "Implement Docker volume management",
+    "description": "Create src/infra/volume.rs implementing volume creation and cleanup. Implement parse_volume_spec(spec, slug) that parses volume specs like 'pgdata:/var/lib/postgresql/data' into (host_volume_name='devrig-{slug}-pgdata', container_path='/var/lib/postgresql/data'). Implement ensure_volume(docker, volume_name, labels) that creates a volume if it doesn't exist. Implement remove_volume(docker, volume_name) with error handling for 'volume in use'. Implement remove_project_volumes(docker, slug) that lists volumes by label and removes them all. Implement list_project_volumes(docker, slug) for discovery.",
+    "files": ["src/infra/volume.rs", "src/infra/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [8]
+  },
+  {
+    "id": 12,
+    "name": "Implement Docker exec",
+    "description": "Create src/infra/exec.rs implementing Docker exec for init scripts and cmd ready checks. Implement exec_in_container(docker, container_id, cmd, attach_stdout, attach_stderr) -> Result<(i64, String)> that creates an exec instance, starts it attached, consumes the output stream, inspects for exit code, and returns (exit_code, combined_output). Implement run_init_scripts(docker, container_id, infra_name, infra_config) that iterates init scripts, detects if postgres image (use psql -U user -c script), otherwise sh -c script. Each script is run via exec, exit code checked, failure aborts with clear error. Implement exec_ready_check(docker, container_id, command, expect) for the 'cmd' ready check strategy.",
+    "files": ["src/infra/exec.rs", "src/infra/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [8]
+  },
+  {
+    "id": 13,
+    "name": "Implement ready check strategies",
+    "description": "Create src/infra/ready.rs implementing all 5 ready check strategies with retry logic. Define a ReadyChecker with async fn check() for each strategy. Implement: (1) PgIsReady — docker exec pg_isready -h localhost -q -t 2, check exit code 0. (2) Cmd — docker exec command, check exit code 0, optionally match expect string in stdout. (3) Http — reqwest::Client::get(url) with 2s timeout, check for 2xx status code. (4) Tcp — TcpStream::connect('127.0.0.1:{port}') with 2s timeout. (5) Log — docker.logs(container, follow=true, stdout=true, stderr=true), scan stream for pattern, wrap in total timeout. Implement run_ready_check(docker, container_id, check, port, timeout) that dispatches to the right strategy and wraps in backon retry (exponential backoff, 250ms min, 3s max delay, jitter) with a total timeout (30s default, 60s for log). Log each retry attempt at debug level. On timeout failure, report last error and attempt count.",
+    "files": ["src/infra/ready.rs", "src/infra/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [12]
+  },
+  {
+    "id": 14,
+    "name": "Implement InfraManager",
+    "description": "Flesh out src/infra/mod.rs with the InfraManager struct that ties together all infra submodules. InfraManager holds a bollard::Docker client (connected via connect_with_local_defaults) and the project slug. Methods: new(slug) -> Result (pings Docker daemon to verify connectivity), start_service(name, config, prev_state, allocated_ports, network_name) -> Result<InfraState> (pull image → create volumes → create container → start → ready check → init scripts → return state), stop_service(state) -> Result (stop container), delete_service(state) -> Result (stop + remove container), cleanup_all(slug) -> Result (label-based discovery and removal of all containers, volumes, networks for the project). Also implement ensure_docker_available() -> Result that calls docker.ping() and returns a clear error if Docker isn't running.",
+    "files": ["src/infra/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [9, 10, 11, 12, 13]
+  },
+  {
+    "id": 15,
+    "name": "Implement compose lifecycle and bridging",
+    "description": "Create src/compose/mod.rs and src/compose/lifecycle.rs implementing compose interop via docker compose CLI. Implement compose_up(compose_file, project_name, services, env_file) that shells out to 'docker compose -f file -p project up -d [services...]'. Implement compose_down(compose_file, project_name) with --remove-orphans. Implement compose_ps(compose_file, project_name) -> Vec<ComposeService> that parses 'docker compose ps --format json' output. ComposeService struct with id, name, service, state, health, publishers (target_port, published_port). Create src/compose/bridge.rs implementing bridge_compose_containers(docker, network_name, compose_containers) that connects each compose container to the devrig network with the service name as alias. Register compose module in src/lib.rs.",
+    "files": ["src/compose/mod.rs", "src/compose/lifecycle.rs", "src/compose/bridge.rs", "src/lib.rs"],
+    "validation": "cargo build",
+    "depends_on": [8]
+  },
+  {
+    "id": 16,
+    "name": "Implement service discovery env vars and URL generation",
+    "description": "Create src/discovery/mod.rs, src/discovery/env.rs, src/discovery/url.rs. In url.rs: implement generate_url(name, infra_config, port) -> String with image-name-based heuristics (postgres -> postgres://user:pass@localhost:port, redis -> redis://localhost:port, multi-port -> localhost:port, default -> http://localhost:port). Extract credentials from infra env (POSTGRES_USER, POSTGRES_PASSWORD). In env.rs: implement build_service_env(service_name, config, resolved_ports) -> BTreeMap<String, String> that builds the complete env var map for a service: global env, DEVRIG_* vars for all infra (HOST, PORT, URL, named ports), DEVRIG_* vars for all services (HOST, PORT, URL), service's own PORT and HOST, service-specific env (overrides). Register discovery module in src/lib.rs. Unit tests: URL generation for postgres with/without password, redis URL, http default URL, multi-port no URL. Env building tests: verify all DEVRIG_* vars present, named port vars, own PORT/HOST injection, service env overrides auto-generated.",
+    "files": ["src/discovery/mod.rs", "src/discovery/env.rs", "src/discovery/url.rs", "src/lib.rs"],
+    "validation": "cargo test discovery",
+    "depends_on": [2]
+  },
+  {
+    "id": 17,
+    "name": "Rewrite orchestrator for multi-phase startup",
+    "description": "Rewrite Orchestrator::start() in src/orchestrator/mod.rs to implement the multi-phase startup pipeline. Phase 0: Parse & validate (existing). Load previous state for port stickiness. Phase 1: If infra or compose present, create Docker network via InfraManager. Phase 2: If compose present, run compose_up, compose_ps, bridge containers, run compose ready checks. Phase 3: For each infra service in dependency order, call InfraManager::start_service (pull, create, start, ready check, init). Phase 4: Resolve all auto ports (services + infra), build template vars, resolve template expressions in service env values, build DEVRIG_* env vars via discovery module. Phase 5: Spawn service supervisors with the complete env (existing logic, now with DEVRIG_* vars injected). Save extended ProjectState (services + infra + compose + network). Print extended startup summary. Rewrite stop() to also stop infra containers and compose. Rewrite delete() to also remove infra containers, volumes, network, and compose down.",
+    "files": ["src/orchestrator/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [4, 6, 7, 14, 15, 16]
+  },
+  {
+    "id": 18,
+    "name": "Implement CLI commands (env, exec, reset)",
+    "description": "Add Env, Exec, Reset variants to Commands enum in src/cli.rs. Env: takes service name (String), optional variable name (Option<String>), --export flag (bool). Exec: takes service name (String). Reset: takes service name (String). Create src/commands/env.rs: loads config + state, resolves all ports and template vars, builds the service env via discovery module, prints KEY=VALUE or export KEY=\"VALUE\" format. If a specific variable is requested, print just that value. Create src/commands/exec.rs: loads state, finds infra container_id, shells out to 'docker exec -it <container> /bin/sh' using std::process::Command (not tokio — needs real TTY). Create src/commands/reset.rs: loads state, clears init_completed for the named infra service, saves state. Add dispatch for all three in main.rs. Register new command modules in src/commands/mod.rs.",
+    "files": ["src/cli.rs", "src/main.rs", "src/commands/mod.rs", "src/commands/env.rs", "src/commands/exec.rs", "src/commands/reset.rs"],
+    "validation": "cargo build",
+    "depends_on": [17]
+  },
+  {
+    "id": 19,
+    "name": "Extend UI and existing commands for infra",
+    "description": "Extend print_startup_summary() in src/ui/summary.rs to display Infrastructure and Compose sections alongside Services. Infrastructure section shows infra name, endpoint (localhost:port or protocol://...), ready status. Compose section shows compose service name and status. Extend RunningService (or add RunningInfra) struct to carry infra-specific display info. Extend src/commands/ps.rs to show infra container status by reading InfraState from state.json and optionally querying Docker for container state. Extend src/commands/doctor.rs to verify Docker daemon is running (not just that the binary exists) by attempting 'docker info' and reporting success/failure.",
+    "files": ["src/ui/summary.rs", "src/commands/ps.rs", "src/commands/doctor.rs"],
+    "validation": "cargo build",
+    "depends_on": [17]
+  },
+  {
+    "id": 20,
+    "name": "Integration tests for infra lifecycle and ready checks",
+    "description": "Create integration tests that require Docker. Add new test files under tests/integration/. (1) infra_lifecycle.rs: Test postgres container lifecycle — start with pg_isready ready check, verify TCP connectivity to the assigned port, stop, verify container removed. Test redis container lifecycle — start with cmd ready check (redis-cli ping), verify connectivity, stop, verify removed. (2) ready_checks.rs: Test each ready check type with a real container. pg_isready with postgres. cmd with redis. tcp with redis (port check). http with a container exposing an HTTP endpoint (e.g., mailpit or httpbin). log with postgres (match 'ready to accept connections'). (3) init_scripts.rs: Start postgres with init SQL ('CREATE TABLE test_table(id int)'), verify table exists via exec, stop, restart, verify init not re-run (table still there from first run), reset, restart, verify init runs again. Add all new test modules to tests/integration.rs. Extend tests/common/mod.rs with Docker test helpers: DockerTestGuard that ensures cleanup on drop, assert_no_leaked_resources(slug).",
+    "files": ["tests/integration/infra_lifecycle.rs", "tests/integration/ready_checks.rs", "tests/integration/init_scripts.rs", "tests/integration.rs", "tests/common/mod.rs"],
+    "validation": "cargo test --features integration -- infra_lifecycle ready_checks init_scripts",
+    "depends_on": [17]
+  },
+  {
+    "id": 21,
+    "name": "Integration tests for service discovery and env",
+    "description": "Create integration tests for service discovery. (1) service_discovery.rs: Start a config with postgres infra + a service, verify the service process receives DEVRIG_POSTGRES_HOST, DEVRIG_POSTGRES_PORT, DEVRIG_POSTGRES_URL env vars (use a service command that prints env to a file, then read the file). Verify URL format is postgres://user:pass@localhost:port. Verify service also gets DEVRIG_{SERVICE}_PORT for other services. (2) env_command.rs: Start a config with infra + service, run `devrig env <service>` CLI command, verify output contains expected DEVRIG_* variables with correct values. Test --export flag produces 'export KEY=\"VALUE\"' format. Test specific variable lookup. (3) auto_port_tests.rs: Start with port=\"auto\" for infra, record the assigned port, stop, start again, verify same port is reused (sticky). If previous port is occupied, verify a new port is assigned. (4) template_tests.rs: Config with {{ infra.postgres.port }} in service env, start, verify the resolved value matches the actual postgres port.",
+    "files": ["tests/integration/service_discovery.rs", "tests/integration/env_command.rs", "tests/integration/auto_port_tests.rs", "tests/integration/template_tests.rs", "tests/integration.rs"],
+    "validation": "cargo test --features integration -- service_discovery env_command auto_port template",
+    "depends_on": [20]
+  },
+  {
+    "id": 22,
+    "name": "Integration tests for compose, volumes, networks, and cleanup",
+    "description": "Create integration tests for compose interop, volume cleanup, network isolation, and leaked resource checks. (1) compose_interop.rs: Create a minimal docker-compose.yml with a redis service, configure [compose] to reference it, start, verify compose container is running and connected to devrig network, verify DEVRIG_* vars are available, stop/delete, verify compose containers are stopped. (2) volume_cleanup.rs: Start postgres with a volume, verify volume exists (docker volume inspect), delete, verify volume is removed. (3) network_tests.rs: Start two separate devrig projects, verify each has its own network (different names), verify no cross-talk. After delete, verify networks are removed. (4) leaked_resources.rs: Start a project with infra, force an error mid-startup (e.g., invalid init script), verify cleanup removes partially-created resources. After normal delete, run assert_no_leaked_resources to verify zero containers/volumes/networks with matching labels remain.",
+    "files": ["tests/integration/compose_interop.rs", "tests/integration/volume_cleanup.rs", "tests/integration/network_tests.rs", "tests/integration/leaked_resources.rs", "tests/integration.rs"],
+    "validation": "cargo test --features integration -- compose_interop volume_cleanup network_tests leaked_resources",
+    "depends_on": [20]
+  },
+  {
+    "id": 23,
+    "name": "Documentation",
+    "description": "Create docs/architecture/service-discovery.md covering: how DEVRIG_* vars are generated, URL generation rules and image-name heuristics, template expression syntax and resolution order, the resolve phase in the startup pipeline, devrig env command usage. Create docs/guides/compose-migration.md covering: when to use compose vs native infra, configuration examples, coexistence on shared network, ready checks for compose services, migration path from compose to native. Update docs/guides/configuration.md to add: [infra.*] section reference with all fields, [compose] section reference, ready_check types and examples, init scripts, service discovery variables (DEVRIG_*), template expressions ({{ }}) with examples, port = 'auto' for infra, devrig env/exec/reset command reference. Update README.md to add infrastructure to the example config snippet and update the feature list.",
+    "files": ["docs/architecture/service-discovery.md", "docs/guides/compose-migration.md", "docs/guides/configuration.md", "README.md"],
+    "validation": "test -f docs/architecture/service-discovery.md && test -f docs/guides/compose-migration.md",
+    "depends_on": [17]
+  }
+]

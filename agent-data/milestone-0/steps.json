@@ -1,0 +1,208 @@
+[
+  {
+    "id": 1,
+    "name": "Bootstrap Rust project",
+    "description": "Initialize the Rust project with `cargo init` in the repo root. Set up Cargo.toml with all v0.1 dependencies (clap, tokio, tokio-util, tokio-stream, serde, toml, petgraph, sha2, hex, nix, owo-colors, tracing, tracing-subscriber, anyhow, thiserror, miette, regex, is-terminal) and dev-dependencies (assert_cmd, assert_fs, predicates, tempfile, tokio test-util). Create the module directory structure with minimal stub files that compile: src/main.rs (simple main), src/lib.rs (module declarations), src/cli.rs, src/identity.rs, src/config/{mod,model,validate,resolve}.rs, src/orchestrator/{mod,supervisor,graph,ports,state,registry}.rs, src/commands/{mod,ps,init,doctor}.rs, src/ui/{mod,logs,summary}.rs. Every file should have just enough content (empty structs, placeholder functions, or just module declarations) so that `cargo build` succeeds. Add the `integration` feature to Cargo.toml features. Set edition to \"2021\" (not 2024 which is not yet stable).",
+    "files": [
+      "Cargo.toml",
+      "src/main.rs",
+      "src/lib.rs",
+      "src/cli.rs",
+      "src/identity.rs",
+      "src/config/mod.rs",
+      "src/config/model.rs",
+      "src/config/validate.rs",
+      "src/config/resolve.rs",
+      "src/orchestrator/mod.rs",
+      "src/orchestrator/supervisor.rs",
+      "src/orchestrator/graph.rs",
+      "src/orchestrator/ports.rs",
+      "src/orchestrator/state.rs",
+      "src/orchestrator/registry.rs",
+      "src/commands/mod.rs",
+      "src/commands/ps.rs",
+      "src/commands/init.rs",
+      "src/commands/doctor.rs",
+      "src/ui/mod.rs",
+      "src/ui/logs.rs",
+      "src/ui/summary.rs"
+    ],
+    "validation": "cargo build",
+    "depends_on": []
+  },
+  {
+    "id": 2,
+    "name": "Config model and parsing",
+    "description": "Implement the core config data model in src/config/model.rs. Define: DevrigConfig (with project, services BTreeMap, env BTreeMap), ProjectConfig (name field), ServiceConfig (path, command, port, env, depends_on), and Port enum (Fixed(u16) | Auto) with a custom serde Deserializer using a Visitor that handles both integer and string inputs. Use BTreeMap<String, ServiceConfig> for deterministic iteration. Add #[serde(default)] on all optional fields. In src/config/mod.rs, implement load_config(path: &Path) -> Result<DevrigConfig> that reads the file and deserializes with toml::from_str(). Write inline unit tests covering: minimal config (just [project] name), full config with services, fixed port parsing, auto port parsing, invalid port string, port out of range, missing required 'name' field, empty services section, service with all fields, env section merging.",
+    "files": [
+      "src/config/mod.rs",
+      "src/config/model.rs"
+    ],
+    "validation": "cargo test config -- --nocapture",
+    "depends_on": [1]
+  },
+  {
+    "id": 3,
+    "name": "Config validation",
+    "description": "Implement post-deserialization validation in src/config/validate.rs. Define ConfigError enum with thiserror derive for: MissingDependency { service, dependency, available }, DuplicatePort { port, services }, DependencyCycle { node }, EmptyCommand { service }. Implement DevrigConfig::validate() -> Result<(), Vec<ConfigError>> that checks: (1) all depends_on references exist in the services map, (2) no two services share the same fixed port, (3) no dependency cycles exist (build a simple adjacency-based DFS for cycle detection — the full petgraph resolver comes in step 6, but validation needs basic cycle detection), (4) no service has an empty command string. The method collects ALL errors before returning. Write inline unit tests: missing dependency detected, duplicate ports detected, valid config passes, multiple errors collected simultaneously, empty command detected, self-referencing depends_on detected.",
+    "files": [
+      "src/config/validate.rs"
+    ],
+    "validation": "cargo test config::validate -- --nocapture",
+    "depends_on": [2]
+  },
+  {
+    "id": 4,
+    "name": "Config resolution and project identity",
+    "description": "Implement config file discovery in src/config/resolve.rs: find_config(start: &Path, filename: &str) -> Option<PathBuf> walks up the directory tree from start, checking for the filename at each level, using PathBuf::pop() for termination. resolve_config(cli_file: Option<&Path>) -> Result<PathBuf> handles the -f flag (direct path, error if not found) or falls back to find_config from CWD with clear error message. Write unit tests using tempfile: config in current dir found, config in parent dir found, config in grandparent found, no config returns None, -f with valid path, -f with invalid path errors.\n\nImplement project identity in src/identity.rs: ProjectIdentity struct with name, id (8 hex chars), slug (\"{name}-{id}\"), config_path. Constructor from_config(config: &DevrigConfig, config_path: &Path) -> Result<Self> that SHA-256 hashes the canonical path, truncates to 4 bytes (8 hex chars). Write unit tests: hash is deterministic (same path → same hash), hash is 8 hex chars, different paths produce different hashes, slug format is correct. Note: use the path string directly for hashing in tests (avoid canonicalize in tests since temp paths may differ).",
+    "files": [
+      "src/config/resolve.rs",
+      "src/identity.rs"
+    ],
+    "validation": "cargo test identity -- --nocapture && cargo test config::resolve -- --nocapture",
+    "depends_on": [2]
+  },
+  {
+    "id": 5,
+    "name": "CLI structure",
+    "description": "Implement the full CLI argument parsing in src/cli.rs using clap's derive API. Define: Cli struct (Parser) with GlobalOpts (flattened) and Commands (subcommand). GlobalOpts has config_file: Option<PathBuf> with #[arg(short = 'f', long = \"file\", global = true)]. Commands enum with: Start { services: Vec<String> }, Stop { services: Vec<String> }, Delete, Ps { #[arg(long)] all: bool }, Init, Doctor. Add #[command(name = \"devrig\", version, about = \"Local development orchestrator\")] to Cli. Ensure all subcommands have doc comments for help text. Update src/main.rs to parse Cli::parse() and match on commands (with todo!() or placeholder messages for now). Update src/lib.rs to re-export the cli module properly.",
+    "files": [
+      "src/cli.rs",
+      "src/main.rs",
+      "src/lib.rs"
+    ],
+    "validation": "cargo build && cargo run -- --help",
+    "depends_on": [1]
+  },
+  {
+    "id": 6,
+    "name": "Dependency graph resolver",
+    "description": "Implement the dependency graph resolver in src/orchestrator/graph.rs using petgraph. Define DependencyResolver struct holding a DiGraph<String, ()> and a BTreeMap<String, NodeIndex> for node lookup. Implement from_config(config: &DevrigConfig) -> Result<Self, String> that adds all services as nodes, then adds directed edges from each dependency to its dependent (dependency → dependent, so toposort yields start order). Implement start_order(&self) -> Result<Vec<String>, String> using petgraph::algo::toposort(), mapping Err(Cycle) to a human-readable error naming the offending service. Write comprehensive inline unit tests: linear chain (a→b→c), diamond dependency (d depends on b,c; b,c depend on a), cycle detected (a→b→c→a), self-loop detected (a→a), no dependencies (three independent services), empty config, single service with no deps. Use a helper make_config() to build test configs and assert_before() to verify ordering constraints.",
+    "files": [
+      "src/orchestrator/graph.rs"
+    ],
+    "validation": "cargo test orchestrator::graph -- --nocapture",
+    "depends_on": [2]
+  },
+  {
+    "id": 7,
+    "name": "Process supervisor",
+    "description": "Implement the service supervisor in src/orchestrator/supervisor.rs. Define RestartPolicy struct with max_restarts (u32), initial_delay, max_delay, reset_after (all Duration), with sensible defaults (10 restarts, 500ms initial, 30s max, 60s reset). Define ServiceSupervisor that manages a single child process: spawn_service() creates a tokio::process::Command with the service's command (parsed via shell: use 'sh -c' to support compound commands), sets working directory from service path, merges global + service env vars, sets .process_group(0) and .kill_on_drop(true), pipes stdout and stderr. The main supervise() async method runs a loop: spawn → select between child.wait() and cancel.cancelled(). On exit: check runtime vs reset_after, increment/reset counter, compute equal-jitter backoff delay, sleep, restart. On cancel: killpg(SIGTERM) → wait with 5s timeout. Send log lines through an mpsc::Sender<LogLine> by reading stdout/stderr with BufReader + LinesStream in spawned tasks.",
+    "files": [
+      "src/orchestrator/supervisor.rs"
+    ],
+    "validation": "cargo build",
+    "depends_on": [2, 6]
+  },
+  {
+    "id": 8,
+    "name": "Log multiplexing and UI",
+    "description": "Implement the log multiplexing system in src/ui/logs.rs. Define LogLine struct { service: String, text: String, is_stderr: bool }. Define LogWriter that owns an mpsc::Receiver<LogLine> and runs as a task: consumes lines, assigns colors to services (cycling through cyan, yellow, green, magenta, blue, red), right-pads service names to the max length for column alignment, prints formatted output. Use owo-colors for coloring. Check is_terminal::is_terminal(std::io::stdout()) to disable colors when piping.\n\nImplement the startup summary in src/ui/summary.rs. Define RunningService { port: Option<u16>, port_auto: bool, status: String }. Implement print_startup_summary(identity: &ProjectIdentity, services: &BTreeMap<String, RunningService>) that prints the branded output: 'devrig ⚡ {name} ({id})', service table with URLs, status indicators, and Ctrl+C hint.\n\nUpdate src/ui/mod.rs to re-export both modules.",
+    "files": [
+      "src/ui/mod.rs",
+      "src/ui/logs.rs",
+      "src/ui/summary.rs"
+    ],
+    "validation": "cargo build",
+    "depends_on": [4]
+  },
+  {
+    "id": 9,
+    "name": "Port collision detection",
+    "description": "Implement port checking in src/orchestrator/ports.rs. Define PortConflict struct { service: String, port: u16, owner: Option<String> }. Implement check_port_available(port: u16) -> bool using TcpListener::bind((\"127.0.0.1\", port)). Implement find_free_port() -> u16 using TcpListener::bind((\"127.0.0.1\", 0)). Implement identify_port_owner(port: u16) -> Option<String> that on Linux reads /proc/net/tcp to find the inode, then scans /proc/*/fd/ to find the owning PID, then reads /proc/{pid}/cmdline. On non-Linux, return None. Implement check_all_ports(services: &BTreeMap<String, ServiceConfig>, identity: &ProjectIdentity) -> Vec<PortConflict> that checks all fixed ports and reports conflicts with the owner process name. Include clear error formatting: 'Port {port} is already in use (by {owner})' with suggestions.",
+    "files": [
+      "src/orchestrator/ports.rs"
+    ],
+    "validation": "cargo build",
+    "depends_on": [2, 4]
+  },
+  {
+    "id": 10,
+    "name": "State management and instance registry",
+    "description": "Implement state persistence in src/orchestrator/state.rs. Define ProjectState struct (serde Serialize/Deserialize) with slug, config_path, services: BTreeMap<String, ServiceState>, started_at. ServiceState has pid (u32), port (Option<u16>), port_auto (bool). Implement ProjectState::save(state_dir: &Path) to write .devrig/state.json. Implement ProjectState::load(state_dir: &Path) -> Option<Self>. Implement ProjectState::remove(state_dir: &Path) to delete the state file and directory.\n\nImplement the global instance registry in src/orchestrator/registry.rs. Define InstanceEntry struct with slug, config_path, state_dir, started_at. Define InstanceRegistry with methods: register(entry) adds/updates an entry in ~/.devrig/instances.json, unregister(slug) removes an entry, list() -> Vec<InstanceEntry> returns all entries, cleanup() removes entries whose PIDs are no longer alive (by checking state.json in each state_dir). Use file locking or atomic write (write to .tmp then rename) to handle concurrent access.",
+    "files": [
+      "src/orchestrator/state.rs",
+      "src/orchestrator/registry.rs"
+    ],
+    "validation": "cargo build",
+    "depends_on": [4]
+  },
+  {
+    "id": 11,
+    "name": "Orchestrator core",
+    "description": "Implement the central orchestrator in src/orchestrator/mod.rs. Define Orchestrator struct that coordinates the full lifecycle. Implement Orchestrator::start(config_path: PathBuf, service_filter: Vec<String>) -> Result<()>: (1) load and parse config, (2) validate config, (3) resolve project identity, (4) resolve dependency order via DependencyResolver, (5) check all ports for conflicts, (6) resolve auto ports, (7) create .devrig/ state directory, (8) create log channel (mpsc), (9) spawn LogWriter task, (10) spawn ServiceSupervisors in dependency order using TaskTracker, (11) register in global instance registry, (12) save state, (13) print startup summary, (14) enter watch mode: select between ctrl_c signal and tracker.wait(). Implement stop(): cancel the CancellationToken, close and wait on TaskTracker with 10s timeout, update state, unregister from global registry. Implement delete(): stop() + remove .devrig/ state directory. Handle second Ctrl+C as force-exit. If service_filter is non-empty, only start the named services plus their transitive dependencies.",
+    "files": [
+      "src/orchestrator/mod.rs"
+    ],
+    "validation": "cargo build",
+    "depends_on": [6, 7, 8, 9, 10]
+  },
+  {
+    "id": 12,
+    "name": "Commands: ps, init, doctor",
+    "description": "Implement the ps command in src/commands/ps.rs. For `devrig ps`: load state from .devrig/state.json, check if each service PID is still alive (nix::sys::signal::kill(pid, None) or /proc/{pid} check), display a table with service name, PID, port, URL, status (running/stopped). For `devrig ps --all`: load the global instance registry from ~/.devrig/instances.json, clean up stale entries, display a table with project name, config path, service count, status.\n\nImplement devrig init in src/commands/init.rs. Detect project type by looking for Cargo.toml (suggest `cargo watch -x run`) or package.json (suggest `npm run dev`). Generate a starter devrig.toml with [project] name (derived from directory name), one example service with detected command, and commented-out examples. Write to current directory, error if devrig.toml already exists.\n\nImplement devrig doctor in src/commands/doctor.rs. Check for: docker (docker --version), k3d (k3d --version), kubectl (kubectl version --client), cargo-watch (cargo watch --version). For each, print the version if found or a 'not found' warning. Report overall status.\n\nUpdate src/commands/mod.rs to re-export all command modules.",
+    "files": [
+      "src/commands/mod.rs",
+      "src/commands/ps.rs",
+      "src/commands/init.rs",
+      "src/commands/doctor.rs"
+    ],
+    "validation": "cargo build",
+    "depends_on": [10, 4]
+  },
+  {
+    "id": 13,
+    "name": "Main entry point wiring",
+    "description": "Wire everything together in src/main.rs and src/lib.rs. Update src/lib.rs to properly re-export all public modules and types needed by both the binary and integration tests. Update src/main.rs to: (1) initialize tracing-subscriber with env-filter (RUST_LOG, default to 'info') and ansi formatting, (2) parse CLI args with Cli::parse(), (3) match on Commands and dispatch to the appropriate handler: Start → resolve config → Orchestrator::start(), Stop → resolve config → Orchestrator::stop(), Delete → resolve config → Orchestrator::delete(), Ps → commands::ps::run(), Init → commands::init::run(), Doctor → commands::doctor::run(). Use #[tokio::main] for the async runtime. Handle errors with anyhow, print user-friendly error messages (not debug format). Install a second Ctrl+C handler for force-exit during shutdown.",
+    "files": [
+      "src/main.rs",
+      "src/lib.rs"
+    ],
+    "validation": "cargo build && cargo test",
+    "depends_on": [5, 11, 12]
+  },
+  {
+    "id": 14,
+    "name": "Integration tests",
+    "description": "Create the integration test suite, feature-gated behind `integration` feature. First create tests/common/mod.rs with test helpers: TestProject::new(toml: &str) creates a TempDir and writes devrig.toml; free_port() / free_ports(n: usize) allocate dynamic ports via TcpListener::bind(0); wait_for_port(port, timeout) polls TcpStream::connect; wait_for_port_release(port, timeout) polls until port is free.\n\nThen create integration test files:\n- tests/integration/mod.rs: module declarations\n- tests/integration/start_stop.rs: Start a service (`python3 -m http.server {port}` or `sleep 3600`), verify port reachable, stop, verify port released, verify state cleaned up\n- tests/integration/config_file_flag.rs: Create config at non-default path, run with -f, verify service starts\n- tests/integration/crash_recovery.rs: Start a service that exits immediately (e.g., `false` or `exit 1`), verify supervisor restarts it (check logs or state), verify backoff delay increases\n- tests/integration/port_collision.rs: Bind a port with TcpListener, then try to start a service on that port, verify clear error message\n- tests/integration/multi_instance.rs: Start two TestProjects on different ports, verify both reachable, stop one, verify the other still runs\n- tests/integration/ps_all.rs: Start two projects, call ps --all logic, verify both appear\n- tests/integration/dir_discovery.rs: Create config in parent dir, run from subdirectory, verify config found\n- tests/integration/label_cleanup.rs: Start project, delete, verify .devrig/ removed, verify processes stopped, verify registry entry removed\n\nUse assert_cmd for CLI-level tests where appropriate, and direct library API calls for lifecycle tests. Each test must clean up after itself (TempDir drop + explicit stop/delete).",
+    "files": [
+      "tests/common/mod.rs",
+      "tests/integration/mod.rs",
+      "tests/integration/start_stop.rs",
+      "tests/integration/config_file_flag.rs",
+      "tests/integration/crash_recovery.rs",
+      "tests/integration/port_collision.rs",
+      "tests/integration/multi_instance.rs",
+      "tests/integration/ps_all.rs",
+      "tests/integration/dir_discovery.rs",
+      "tests/integration/label_cleanup.rs"
+    ],
+    "validation": "cargo test && cargo test --features integration",
+    "depends_on": [13]
+  },
+  {
+    "id": 15,
+    "name": "Documentation",
+    "description": "Write all required documentation files.\n\nREADME.md: Rewrite with quickstart structure — one-liner about devrig, demo placeholder (TODO: asciinema), copy-pasteable quickstart commands, minimal example devrig.toml showing 2 services, core CLI commands with one-line descriptions, link to docs/ for details. Keep under 200 lines.\n\nADRs (docs/adr/): Create 8 ADR files, each following Context → Decision → Consequences format:\n- 001-toml-only.md: Why TOML over YAML/JSON for config\n- 002-no-profiles.md: Why -f flag instead of profiles/environments\n- 003-isolated-kubeconfig.md: Why .devrig/kubeconfig, never touch ~/.kube/config\n- 004-compose-interop.md: Why support docker-compose.yml delegation\n- 005-traefik-over-nginx.md: Why prefer Traefik for ingress\n- 006-in-memory-otel.md: Why ring buffers in-memory, no disk persistence\n- 007-agent-browser-testing.md: Why agent-browser E2E over component unit tests\n- 008-multi-instance-isolation.md: Why project slug (name+hash), label-based discovery\n\nArchitecture docs (docs/architecture/):\n- overview.md: System architecture, component diagram, runtime model, tech stack\n- config-model.md: TOML schema, two-phase parsing, Port type, validation rules, serde patterns\n- dependency-graph.md: petgraph usage, topological sort, cycle detection, edge direction convention\n- multi-instance.md: Project identity derivation, slug format, state scoping, registry design, port collision detection\n\nGuides (docs/guides/):\n- getting-started.md: Install from source, cargo install, devrig init, devrig start, devrig stop, devrig delete walkthrough\n- configuration.md: Full devrig.toml reference for v0.1 ([project], [services.*], [env], port options, depends_on, path)\n- contributing.md: Dev setup (clone, cargo build), running tests (cargo test, --features integration), code organization, module map, PR guidelines",
+    "files": [
+      "README.md",
+      "docs/adr/001-toml-only.md",
+      "docs/adr/002-no-profiles.md",
+      "docs/adr/003-isolated-kubeconfig.md",
+      "docs/adr/004-compose-interop.md",
+      "docs/adr/005-traefik-over-nginx.md",
+      "docs/adr/006-in-memory-otel.md",
+      "docs/adr/007-agent-browser-testing.md",
+      "docs/adr/008-multi-instance-isolation.md",
+      "docs/architecture/overview.md",
+      "docs/architecture/config-model.md",
+      "docs/architecture/dependency-graph.md",
+      "docs/architecture/multi-instance.md",
+      "docs/guides/getting-started.md",
+      "docs/guides/configuration.md",
+      "docs/guides/contributing.md"
+    ],
+    "validation": "test -f README.md && test -f docs/adr/001-toml-only.md && test -f docs/adr/008-multi-instance-isolation.md && test -f docs/architecture/overview.md && test -f docs/architecture/multi-instance.md && test -f docs/guides/getting-started.md && test -f docs/guides/configuration.md && test -f docs/guides/contributing.md && echo 'All docs present'",
+    "depends_on": [13]
+  }
+]

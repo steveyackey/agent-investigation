@@ -1,0 +1,218 @@
+[
+  {
+    "id": 1,
+    "name": "Add new dependencies to Cargo.toml",
+    "description": "Add all new crate dependencies needed for v0.5. Add axum = { version = \"0.8\", features = [\"ws\"] }, tower-http = { version = \"0.6\", features = [\"cors\", \"compression-br\"] }, tonic = \"0.12\", prost = \"0.13\", prost-types = \"0.13\", opentelemetry-proto = { version = \"0.27\", features = [\"gen-tonic\", \"trace\", \"metrics\", \"logs\", \"with-serde\"] }, rust-embed = { version = \"8\", features = [\"compression\"] }, mime_guess = \"2\", humantime = \"2\", dashmap = \"6\". If tonic 0.12 + opentelemetry-proto 0.27 fails to compile with axum 0.8 due to hyper/tower version conflicts, try tonic 0.14 + prost 0.14 + opentelemetry-proto 0.31. The build must succeed with all dependencies resolved. Also add a [features] section: dashboard = [] and make it a default feature. Run cargo build to verify everything compiles.",
+    "files": ["Cargo.toml"],
+    "validation": "cargo build",
+    "depends_on": []
+  },
+  {
+    "id": 2,
+    "name": "Config model: DashboardConfig and OtelConfig",
+    "description": "Add DashboardConfig and OtelConfig structs to src/config/model.rs. DashboardConfig has: port (u16, default 4000), enabled (Option<bool>, defaults to true when section present), otel (Option<OtelConfig>). OtelConfig has: grpc_port (u16, default 4317), http_port (u16, default 4318), trace_buffer (usize, default 10000), metric_buffer (usize, default 50000), log_buffer (usize, default 100000), retention (String, default \"1h\"). All fields use #[serde(default = \"default_fn\")] with appropriate default functions. Add `pub dashboard: Option<DashboardConfig>` to DevrigConfig with #[serde(default)]. Derive Debug, Clone, Deserialize, Serialize, PartialEq on both structs. Add unit tests: parse full dashboard config, parse minimal dashboard (port only), parse with otel subsection, parse empty dashboard (all defaults), existing configs without [dashboard] still parse correctly, invalid retention string detected.",
+    "files": ["src/config/model.rs"],
+    "validation": "cargo test config::model",
+    "depends_on": [1]
+  },
+  {
+    "id": 3,
+    "name": "Config validation for dashboard ports",
+    "description": "Extend src/config/validate.rs to validate dashboard config: (1) Check dashboard port does not conflict with any service or infra fixed port. (2) Check OTLP gRPC and HTTP ports do not conflict with service/infra ports or the dashboard port itself. (3) Validate the retention string is parseable by humantime::parse_duration(). (4) Check dashboard port, grpc_port, http_port are all different from each other. Add new ConfigDiagnostic variants with miette source spans for dashboard port conflicts. Add unit tests: dashboard port conflicts with service port, otel ports conflict with infra, retention parse failure, valid dashboard config passes, all three dashboard/otel ports must be distinct.",
+    "files": ["src/config/validate.rs"],
+    "validation": "cargo test config::validate",
+    "depends_on": [2]
+  },
+  {
+    "id": 4,
+    "name": "Template interpolation and port checking for dashboard",
+    "description": "Extend src/config/interpolate.rs build_template_vars() to add dashboard.port, dashboard.otel.grpc_port, dashboard.otel.http_port when dashboard config is present. Extend src/orchestrator/ports.rs check_all_ports_unified() to include dashboard port, OTLP gRPC port, and OTLP HTTP port in conflict detection (check these ports are available on the host). Add unit tests for new template vars. Extend src/orchestrator/state.rs: add DashboardState struct with dashboard_port (u16), grpc_port (u16), http_port (u16). Add `dashboard: Option<DashboardState>` to ProjectState with #[serde(default)].",
+    "files": ["src/config/interpolate.rs", "src/orchestrator/ports.rs", "src/orchestrator/state.rs"],
+    "validation": "cargo test config::interpolate && cargo test orchestrator && cargo build",
+    "depends_on": [2]
+  },
+  {
+    "id": 5,
+    "name": "OTel internal types",
+    "description": "Create src/otel/mod.rs and src/otel/types.rs. Define internal telemetry types that are independent of the proto types. StoredSpan: record_id (u64), trace_id (String, hex), span_id (String, hex), parent_span_id (Option<String>), service_name (String), operation_name (String), start_time (DateTime<Utc>), end_time (DateTime<Utc>), duration_ms (u64), status (SpanStatus enum: Ok/Error/Unset), status_message (Option<String>), attributes (Vec<(String, String)>), kind (SpanKind enum). StoredLog: record_id (u64), timestamp (DateTime<Utc>), service_name (String), severity (LogSeverity enum), body (String), trace_id (Option<String>), span_id (Option<String>), attributes (Vec<(String, String)>). StoredMetric: record_id (u64), timestamp (DateTime<Utc>), service_name (String), metric_name (String), metric_type (MetricType enum: Gauge/Counter/Histogram), value (f64), attributes (Vec<(String, String)>), unit (Option<String>). TelemetryEvent enum (Clone, Serialize) with tagged variants: TraceUpdate { trace_id, service, duration_ms, has_error }, LogRecord { trace_id, severity, body, service }, MetricUpdate { name, value, service }, ServiceStatusChange { service, status }. All types derive Debug, Clone, Serialize, Deserialize. Add src/otel/mod.rs declaring submodules: pub mod types, pub mod storage, pub mod query, pub mod receiver_grpc, pub mod receiver_http. Update src/lib.rs to add pub mod otel.",
+    "files": ["src/otel/mod.rs", "src/otel/types.rs", "src/lib.rs"],
+    "validation": "cargo build",
+    "depends_on": [1]
+  },
+  {
+    "id": 6,
+    "name": "TelemetryStore ring buffer storage",
+    "description": "Create src/otel/storage.rs implementing the core TelemetryStore. Fields: spans (VecDeque<StoredSpan>), logs (VecDeque<StoredLog>), metrics (VecDeque<StoredMetric>), next_id (u64), trace_index (HashMap<String, Vec<u64>>), service_span_index (HashMap<String, Vec<u64>>), service_log_index (HashMap<String, Vec<u64>>), service_metric_index (HashMap<String, Vec<u64>>), error_spans (HashSet<u64>), max_spans/max_logs/max_metrics (usize), retention (Duration). Implement: new(max_spans, max_logs, max_metrics, retention) constructor. insert_span(span) -> () that assigns record_id, appends to VecDeque, updates all span indexes, and evicts oldest if at capacity (cleaning up evicted item's index entries). insert_log(log) -> () similarly. insert_metric(metric) -> () similarly. Private evict_span/evict_log/evict_metric that remove index entries. Private remove_span_from_indexes/remove_log_from_indexes/remove_metric_from_indexes methods. sweep_expired() that removes items older than retention from the front of each VecDeque. get_span_count/get_log_count/get_metric_count accessors. Unit tests: (1) insert spans up to capacity, verify all present. (2) insert one past capacity, verify oldest evicted and its index entries cleaned. (3) insert spans with same trace_id, verify trace_index groups them. (4) insert error span, verify error_spans index. (5) insert spans from different services, verify service_index. (6) sweep_expired removes old items. (7) concurrent scenario: insert + query in sequence. (8) index cleanup is complete (no dangling entries after eviction).",
+    "files": ["src/otel/storage.rs"],
+    "validation": "cargo test otel::storage",
+    "depends_on": [5]
+  },
+  {
+    "id": 7,
+    "name": "Query engine on TelemetryStore",
+    "description": "Create src/otel/query.rs implementing query methods on TelemetryStore (called via &self, so requires read access). Define TraceQuery struct: service (Option<String>), status (Option<SpanStatus>), min_duration_ms (Option<u64>), since (Option<DateTime<Utc>>), limit (Option<usize>, default 100). Define LogQuery struct: service (Option<String>), severity (Option<LogSeverity>), search (Option<String>), trace_id (Option<String>), since (Option<DateTime<Utc>>), limit (Option<usize>, default 200). Define MetricQuery struct: name (Option<String>), service (Option<String>), since (Option<DateTime<Utc>>), limit (Option<usize>, default 500). Define TraceSummary struct: trace_id, services (Vec<String>), root_operation (String), duration_ms, span_count (usize), has_error (bool), start_time. Define TraceDetail struct: trace_id, spans (Vec<StoredSpan>). Define RelatedTelemetry struct: logs (Vec<StoredLog>), metrics (Vec<StoredMetric>). Implement on TelemetryStore: query_traces(TraceQuery) -> Vec<TraceSummary>: scan spans, group by trace_id, compute summaries, apply filters, sort by start_time desc. get_trace(trace_id: &str) -> Option<TraceDetail>: lookup trace_index, collect spans. query_logs(LogQuery) -> Vec<StoredLog>: scan logs with filters. query_metrics(MetricQuery) -> Vec<StoredMetric>: scan metrics with filters. get_status() -> SystemStatus: counts + service list. get_related(trace_id: &str) -> RelatedTelemetry: find logs/metrics from same service in trace's time window. For text search in logs, use case-insensitive contains on body. Unit tests: query traces by service, by error status, by min duration. Query logs by severity, by trace_id, by search text. Query metrics by name. Get related telemetry for a trace.",
+    "files": ["src/otel/query.rs"],
+    "validation": "cargo test otel::query",
+    "depends_on": [6]
+  },
+  {
+    "id": 8,
+    "name": "gRPC OTLP receiver",
+    "description": "Create src/otel/receiver_grpc.rs implementing the gRPC OTLP receiver using tonic. Define OtlpGrpcReceiver struct holding Arc<RwLock<TelemetryStore>> and broadcast::Sender<TelemetryEvent>. Implement tonic async traits: opentelemetry_proto TraceService::export() — extract resource_spans, iterate scope_spans and spans, convert each proto Span to StoredSpan (extract service.name from resource.attributes key 'service.name', convert trace_id/span_id bytes to hex via hex::encode, convert start_time_unix_nano/end_time_unix_nano to DateTime<Utc>, map status to SpanStatus, extract first 20 attributes as key-value string pairs). Write lock TelemetryStore, insert each span. Send TelemetryEvent::TraceUpdate to broadcast channel (outside the write lock). Return ExportTraceServiceResponse. Similarly implement MetricsService::export() and LogsService::export(). For metrics, handle NumberDataPoint from gauges/sums — extract data points as StoredMetric. For logs, extract LogRecord fields. Define a start_grpc_server(port, store, events_tx) async function that creates a tonic Server, adds all three services, and serves on 0.0.0.0:port. Returns JoinHandle. Add conversion helper functions: proto_span_to_stored, proto_log_to_stored, proto_metric_to_stored. Unit tests for conversion functions: verify trace_id hex encoding, service name extraction, timestamp conversion, attribute extraction.",
+    "files": ["src/otel/receiver_grpc.rs"],
+    "validation": "cargo test otel::receiver_grpc && cargo build",
+    "depends_on": [6]
+  },
+  {
+    "id": 9,
+    "name": "HTTP OTLP receiver",
+    "description": "Create src/otel/receiver_http.rs implementing the HTTP OTLP receiver using Axum. Define handler functions: post_traces, post_metrics, post_logs. Each handler accepts Axum State<Arc<RwLock<TelemetryStore>>> and bytes body. Determine content type from request headers. For application/x-protobuf: decode using prost::Message::decode(). For application/json: decode using serde_json::from_slice() (requires opentelemetry-proto with-serde feature). Reuse the same conversion functions from receiver_grpc (proto_span_to_stored, etc.) — move them to types.rs or a shared conversion module if needed. After conversion and storage, send TelemetryEvent to broadcast channel. Return appropriate OTLP response (ExportTraceServiceResponse serialized). Define otlp_http_router(store, events_tx) -> Router that mounts POST /v1/traces, /v1/metrics, /v1/logs. Add tower-http CORS middleware (allow all origins for dev). Define start_http_otlp_server(port, store, events_tx) that binds and serves the router. Returns JoinHandle. Unit tests: verify protobuf decoding of a hand-constructed ExportTraceServiceRequest.",
+    "files": ["src/otel/receiver_http.rs"],
+    "validation": "cargo build",
+    "depends_on": [8]
+  },
+  {
+    "id": 10,
+    "name": "OtelCollector coordinator",
+    "description": "Update src/otel/mod.rs to define OtelCollector struct that owns Arc<RwLock<TelemetryStore>> and broadcast::Sender<TelemetryEvent>. Implement OtelCollector::new(otel_config: &OtelConfig) -> Self that creates the TelemetryStore with configured buffer sizes and retention (parse retention string via humantime::parse_duration), creates broadcast channel (capacity 1024). Implement OtelCollector::start(cancel: CancellationToken) -> Result<()> that spawns the gRPC server and HTTP OTLP server as background tasks. Implement OtelCollector::store() -> Arc<RwLock<TelemetryStore>> and OtelCollector::events_tx() -> broadcast::Sender<TelemetryEvent> accessors. Add a background sweeper task that calls store.write().sweep_expired() every 30 seconds, respecting the cancellation token.",
+    "files": ["src/otel/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [8, 9]
+  },
+  {
+    "id": 11,
+    "name": "Query output formatters",
+    "description": "Create src/query/mod.rs and src/query/output.rs. Define OutputFormat enum: Json, JsonPretty, Table. Implement format_traces(traces: &[TraceSummary], format: OutputFormat) -> String: Json writes NDJSON (one JSON object per line via serde_json::to_string), JsonPretty writes serde_json::to_string_pretty of the full array, Table uses comfy-table with columns: Trace ID (truncated to 16 chars), Service, Operation, Duration, Spans, Status, Time. Similarly implement format_trace_detail, format_logs, format_metrics, format_status, format_related. Add src/query/mod.rs to src/lib.rs. Unit tests: verify NDJSON output has one object per line, table output contains expected headers.",
+    "files": ["src/query/mod.rs", "src/query/output.rs", "src/lib.rs"],
+    "validation": "cargo test query::output",
+    "depends_on": [7]
+  },
+  {
+    "id": 12,
+    "name": "Dashboard REST API routes",
+    "description": "Create src/dashboard/mod.rs and src/dashboard/routes/ directory with mod.rs, traces.rs, metrics.rs, logs.rs, status.rs, env.rs, services.rs. Define AppState struct (Clone) with: store (Arc<RwLock<TelemetryStore>>), events_tx (broadcast::Sender<TelemetryEvent>), config (Arc<DevrigConfig>), identity (Arc<ProjectIdentity>), resolved_ports (Arc<HashMap<String, u16>>), cancel (CancellationToken). In routes/traces.rs: GET /api/traces handler that extracts query params (service, status, min_duration, last, limit), parses 'last' duration via humantime, constructs TraceQuery, calls store.read().query_traces(), returns JSON. GET /api/traces/{trace_id} handler returns trace detail. GET /api/traces/{trace_id}/related returns related telemetry. In routes/metrics.rs: GET /api/metrics with query params (name, service, last, limit). In routes/logs.rs: GET /api/logs with query params (service, level, search, trace_id, last, limit). In routes/status.rs: GET /api/status returns system status. In routes/env.rs: GET /api/env returns all service env vars (reuse build_service_env from discovery module). GET /api/env/{service} returns env for specific service. In routes/services.rs: POST /api/services/{name}/restart sends ServiceCommand::Restart to an mpsc channel. All handlers return JSON with appropriate status codes. Add error handling: 404 for unknown trace IDs, 400 for invalid query params. In routes/mod.rs: define api_router(state) -> Router that nests all routes under /api. Add tower-http CORS layer.",
+    "files": ["src/dashboard/mod.rs", "src/dashboard/routes/mod.rs", "src/dashboard/routes/traces.rs", "src/dashboard/routes/metrics.rs", "src/dashboard/routes/logs.rs", "src/dashboard/routes/status.rs", "src/dashboard/routes/env.rs", "src/dashboard/routes/services.rs"],
+    "validation": "cargo build",
+    "depends_on": [7, 10]
+  },
+  {
+    "id": 13,
+    "name": "WebSocket handler",
+    "description": "Create src/dashboard/ws.rs implementing the WebSocket endpoint. The handler upgrades the HTTP connection to a WebSocket. After upgrade, subscribe to the broadcast::Sender<TelemetryEvent> via .subscribe(). Run a loop: collect events for up to 100ms (using tokio::time::sleep + tokio::select on the broadcast receiver), batch them into a JSON array, send as a text WebSocket message. Handle RecvError::Lagged by skipping. Add a 5-second send timeout — if the client is too slow, close the connection. Handle client disconnect gracefully. Add ping/pong keepalive every 30 seconds. Register the WebSocket route as GET /api/ws in the dashboard router.",
+    "files": ["src/dashboard/ws.rs"],
+    "validation": "cargo build",
+    "depends_on": [12]
+  },
+  {
+    "id": 14,
+    "name": "Static file serving with rust-embed",
+    "description": "Create src/dashboard/static_files.rs. Define a rust-embed Asset struct pointing to dashboard-ui/dist/ (the built SolidJS output directory). Implement a static_handler Axum handler: extract the request path, strip leading slash, look up in the embedded assets. If found, return the file with correct Content-Type (via mime_guess). If not found and path does NOT start with /api/, serve index.html (SPA fallback for client-side routing). If path starts with /api/ and no route matched, return 404 JSON error. The handler should set Cache-Control headers: immutable+max-age=1yr for hashed assets (files containing a hash in the name), no-cache for index.html. Create a minimal placeholder dashboard-ui/dist/index.html with a basic HTML page saying 'devrig dashboard' so that cargo build succeeds even without the frontend built. Wire the static handler as .fallback() on the dashboard router in src/dashboard/mod.rs.",
+    "files": ["src/dashboard/static_files.rs", "src/dashboard/mod.rs", "dashboard-ui/dist/index.html"],
+    "validation": "cargo build",
+    "depends_on": [12]
+  },
+  {
+    "id": 15,
+    "name": "Dashboard server assembly",
+    "description": "Update src/dashboard/mod.rs to define DashboardServer struct holding AppState. Implement DashboardServer::new(state: AppState) and DashboardServer::start(port: u16) -> Result<JoinHandle<()>> that creates the full Axum router: nest api_router under /, add WebSocket route, add static file fallback. Bind to 0.0.0.0:port using tokio::net::TcpListener and axum::serve(). The server runs until the CancellationToken in AppState is cancelled. Add the dashboard module declaration to src/lib.rs. Ensure all submodules (routes, ws, static_files) are properly declared. Run cargo build to verify the full dashboard module compiles.",
+    "files": ["src/dashboard/mod.rs", "src/lib.rs"],
+    "validation": "cargo build",
+    "depends_on": [13, 14]
+  },
+  {
+    "id": 16,
+    "name": "Orchestrator Phase 4.5: dashboard + OTLP startup",
+    "description": "Insert Phase 4.5 into src/orchestrator/mod.rs between Phase 4 (Resolve & Inject) and Phase 5 (Services). If config.dashboard is Some and enabled is not explicitly false: (1) Get dashboard port (default 4000), grpc_port (default 4317), http_port (default 4318) from config or defaults. (2) Create OtelCollector with otel config (or defaults if otel section absent). (3) Start the OTLP collector (gRPC + HTTP servers). (4) Construct AppState with store from collector, events_tx from collector, config, identity, resolved_ports, cancel token. (5) Create and start DashboardServer on dashboard port. (6) Record DashboardState in project state (dashboard_port, grpc_port, http_port). (7) Add OTEL env vars to resolved env: in Phase 5 service env building, inject OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:{http_port}, OTEL_SERVICE_NAME={service_name}, DEVRIG_DASHBOARD_URL=http://localhost:{dashboard_port} for every service. This requires updating the env building in Phase 5 or extending build_service_env in src/discovery/env.rs. Update src/discovery/env.rs to accept an optional dashboard config parameter and inject these vars when present. Update src/ui/summary.rs to show Dashboard URL, OTel gRPC, and OTel HTTP in the startup summary when dashboard is configured.",
+    "files": ["src/orchestrator/mod.rs", "src/discovery/env.rs", "src/ui/summary.rs", "src/orchestrator/state.rs"],
+    "validation": "cargo build && cargo test",
+    "depends_on": [4, 10, 15]
+  },
+  {
+    "id": 17,
+    "name": "CLI query commands",
+    "description": "Create src/commands/query.rs implementing the devrig query subcommands. Add QueryCommands enum to src/cli.rs: Traces { service, status, min_duration, last, format, limit }, Trace { trace_id, format }, Metrics { name, service, last, format, limit }, Logs { service, level, search, trace_id, last, format, limit }, Status { format }, Related { trace_id, format }. Add Query { command: QueryCommands } variant to Commands enum. Each command handler: (1) Determine dashboard URL from config (load config, read dashboard port, default to http://localhost:4000). (2) Make HTTP GET request to the corresponding REST API endpoint using reqwest. (3) If the dashboard is not reachable, print error: 'Dashboard is not running. Start devrig first with [dashboard] configured.' (4) Parse JSON response. (5) Format output using query::output formatters based on --format flag (default: json for NDJSON). (6) Print to stdout. The --last flag accepts humantime duration strings (e.g., '5m', '1h', '30s'). The --min-duration flag also accepts humantime strings. The --format flag accepts 'json' (NDJSON, default), 'json-pretty', 'table'. Add dispatch in src/main.rs for Commands::Query. Add query module to src/commands/mod.rs.",
+    "files": ["src/commands/query.rs", "src/cli.rs", "src/main.rs", "src/commands/mod.rs"],
+    "validation": "cargo build",
+    "depends_on": [11, 12]
+  },
+  {
+    "id": 18,
+    "name": "Frontend scaffolding",
+    "description": "Create the dashboard-ui/ directory with a complete SolidJS + Vite + Tailwind + TypeScript project. Create package.json with dependencies: solid-js (^1.9), @solidjs/router (latest), vite (^6), vite-plugin-solid (^2.11), typescript (^5.7), tailwindcss (^3), postcss (^8), autoprefixer (^10), @solid-primitives/websocket (latest), uplot (^1.6). Create vite.config.ts that uses vite-plugin-solid, sets build output to dist/. Create tsconfig.json for SolidJS (jsx: preserve, jsxImportSource: solid-js). Create tailwind.config.js scanning src/**/*.{ts,tsx}. Create postcss.config.js with tailwindcss + autoprefixer. Create src/index.tsx as the app entry point: imports App, renders to #root. Create src/App.tsx with a basic layout: left Sidebar, main content area with @solidjs/router Routes. Create src/index.css with Tailwind directives (@tailwind base/components/utilities) plus dark mode CSS variables. Create src/types/telemetry.ts with TypeScript interfaces matching the Rust types: TraceSummary, TraceDetail, StoredSpan, StoredLog, StoredMetric, TelemetryEvent, SystemStatus. Create src/lib/api.ts with fetch wrapper functions: fetchTraces, fetchTrace, fetchMetrics, fetchLogs, fetchStatus, fetchRelated, restartService. Each calls the appropriate /api/* endpoint and returns typed data. Create src/lib/ws.ts with a createWebSocket function using @solid-primitives/websocket for reconnecting WebSocket with event parsing. Create src/lib/theme.ts with dark/light mode toggle using localStorage persistence and document class toggling. Create src/lib/store.ts with a SolidJS createStore for telemetry state: traces, logs, metrics, status, with update functions. Run: cd dashboard-ui && npm install && npm run build (should produce dist/index.html). Update the placeholder dist/index.html with the actual build output.",
+    "files": ["dashboard-ui/package.json", "dashboard-ui/vite.config.ts", "dashboard-ui/tsconfig.json", "dashboard-ui/tailwind.config.js", "dashboard-ui/postcss.config.js", "dashboard-ui/src/index.tsx", "dashboard-ui/src/index.css", "dashboard-ui/src/App.tsx", "dashboard-ui/src/types/telemetry.ts", "dashboard-ui/src/lib/api.ts", "dashboard-ui/src/lib/ws.ts", "dashboard-ui/src/lib/theme.ts", "dashboard-ui/src/lib/store.ts"],
+    "validation": "cd dashboard-ui && npm install && npm run build && test -f dist/index.html",
+    "depends_on": [1]
+  },
+  {
+    "id": 19,
+    "name": "Frontend Sidebar and navigation components",
+    "description": "Create dashboard-ui/src/components/Sidebar.tsx: a vertical navigation bar with links to Overview (/), Traces (/traces), Metrics (/metrics), Logs (/logs). Use Tailwind for styling: dark bg, white text, hover states, active state indicator. Each nav item shows an icon (use simple SVG or unicode) and label. The sidebar should be collapsible on mobile. Create dashboard-ui/src/components/ThemeToggle.tsx: a button that toggles dark/light mode using the theme.ts module. Show sun/moon icon based on current mode. Place it in the sidebar footer. Create dashboard-ui/src/components/CommandPalette.tsx: a Cmd+K (or Ctrl+K on non-Mac) command palette overlay. Listen for keyboard shortcut globally. Show a search input + list of actions: 'Go to Overview', 'Go to Traces', 'Go to Metrics', 'Go to Logs', 'Jump to Trace ID...' (accepts trace ID input). Filter actions as user types. Navigate on selection. Use a dialog/modal overlay with backdrop. Implement keyboard navigation (arrow keys, enter to select, escape to close). Update App.tsx to include Sidebar, CommandPalette, and ThemeToggle in the layout. Rebuild frontend: cd dashboard-ui && npm run build.",
+    "files": ["dashboard-ui/src/components/Sidebar.tsx", "dashboard-ui/src/components/ThemeToggle.tsx", "dashboard-ui/src/components/CommandPalette.tsx", "dashboard-ui/src/App.tsx"],
+    "validation": "cd dashboard-ui && npm run build",
+    "depends_on": [18]
+  },
+  {
+    "id": 20,
+    "name": "Frontend Overview view",
+    "description": "Create dashboard-ui/src/views/Overview.tsx: the landing page showing at-a-glance status of all services and infrastructure. Fetches data from GET /api/status on mount. Displays: (1) Service cards in a grid — each card shows service name, status badge (running/stopped/error with color), port, URL. (2) Infrastructure cards showing container name, image, port, status. (3) Cluster info if present. (4) Quick-action buttons: restart, stop for each service (POST /api/services/{name}/restart or /stop). (5) Summary stats: total services, total traces, total logs. Add data-testid attributes to all key elements: 'service-card-{name}', 'infra-card-{name}', 'restart-btn-{name}', 'status-badge-{name}'. Subscribe to WebSocket for ServiceStatusChange events to update status in real-time. Use the store.ts telemetry store for state management. Rebuild: cd dashboard-ui && npm run build.",
+    "files": ["dashboard-ui/src/views/Overview.tsx"],
+    "validation": "cd dashboard-ui && npm run build",
+    "depends_on": [19]
+  },
+  {
+    "id": 21,
+    "name": "Frontend Traces view with waterfall",
+    "description": "Create dashboard-ui/src/views/Traces.tsx: trace list page. Fetches traces from GET /api/traces (with query param support for service filter, status filter). Displays a table: Trace ID (clickable link), Service(s), Operation, Duration (with color coding: green < 100ms, yellow < 500ms, red >= 500ms), Span Count, Status (ok/error badge), Time. Clicking a trace ID navigates to /traces/{traceId}. Add filter controls: service dropdown, status filter (all/ok/error), min duration input. Create dashboard-ui/src/views/TraceDetail.tsx: trace waterfall page. Route: /traces/:id. Fetches trace detail from GET /api/traces/{id}. Renders a waterfall visualization: each span is a horizontal bar positioned by start time relative to trace start, width proportional to duration. Spans are indented based on parent-child relationships (use parent_span_id). Each bar shows: operation name, duration, service name with color coding per service. Clicking a span shows detail panel (slide-over or below): all attributes, status, timestamps, links to 'View logs' (navigates to /logs?traceId={traceId}&service={service}), 'View metrics' (navigates to /metrics?service={service}). Add data-testid: 'trace-row-{id}', 'waterfall-span-{spanId}', 'span-detail-panel', 'filter-service', 'filter-status'. Rebuild: cd dashboard-ui && npm run build.",
+    "files": ["dashboard-ui/src/views/Traces.tsx", "dashboard-ui/src/views/TraceDetail.tsx"],
+    "validation": "cd dashboard-ui && npm run build",
+    "depends_on": [19]
+  },
+  {
+    "id": 22,
+    "name": "Frontend Metrics and Logs views",
+    "description": "Create dashboard-ui/src/views/Metrics.tsx: metric discovery page. Fetches from GET /api/metrics. Shows a list of discovered metric names grouped by service. Clicking a metric name shows a time-series line chart (use uPlot via a simple wrapper component or inline canvas). The chart shows value over time for the selected metric. Add service filter dropdown. Add data-testid: 'metric-list', 'metric-name-{name}', 'metric-chart'. Create dashboard-ui/src/views/Logs.tsx: structured log viewer. Fetches from GET /api/logs (with query params). Displays log lines in a table/list: Timestamp, Service, Severity (with colored badge: DEBUG blue, INFO green, WARN yellow, ERROR red), Body text (truncated, expandable). Filter controls: service dropdown, severity dropdown (trace/debug/info/warn/error), text search input. Each log with a trace_id shows a 'View Trace' link navigating to /traces/{traceId}. Add data-testid: 'log-row', 'log-filter-service', 'log-filter-severity', 'log-search', 'log-trace-link'. Both views subscribe to WebSocket for real-time updates: new MetricUpdate events update the chart, new LogRecord events prepend to the log list. Rebuild: cd dashboard-ui && npm run build.",
+    "files": ["dashboard-ui/src/views/Metrics.tsx", "dashboard-ui/src/views/Logs.tsx"],
+    "validation": "cd dashboard-ui && npm run build",
+    "depends_on": [19]
+  },
+  {
+    "id": 23,
+    "name": "Frontend final polish and keyboard shortcuts",
+    "description": "Add keyboard shortcut handling to the App component: 't' navigates to /traces, 'l' to /logs, 'm' to /metrics, 'o' to / (overview), Escape goes back. Only activate when no input is focused. Update the WebSocket integration in store.ts: on TraceUpdate event, add/update trace in the traces list. On LogRecord, prepend to logs. On MetricUpdate, update metric data. On ServiceStatusChange, update service status in overview. Add cross-telemetry navigation helpers: from log detail, 'View Trace' button when trace_id is present. From trace span detail, 'View Logs' and 'View Metrics' links with appropriate query params. Ensure dark mode is the default (set in theme.ts). Ensure all views have proper loading states (show 'Loading...' while fetching). Ensure all views handle empty state (show 'No traces found' etc). Final npm run build to produce the complete dashboard-ui/dist/ output.",
+    "files": ["dashboard-ui/src/App.tsx", "dashboard-ui/src/lib/store.ts", "dashboard-ui/src/views/Traces.tsx", "dashboard-ui/src/views/Logs.tsx", "dashboard-ui/src/views/Metrics.tsx", "dashboard-ui/src/views/Overview.tsx"],
+    "validation": "cd dashboard-ui && npm run build && cargo build",
+    "depends_on": [20, 21, 22]
+  },
+  {
+    "id": 24,
+    "name": "Integration tests for OTLP ingest and query CLI",
+    "description": "Create tests/integration/otel_ingest.rs with integration tests (behind #[cfg(feature = \"integration\")]). Test infrastructure: write a test devrig.toml with [project], [services.echo] (simple echo server), and [dashboard] with [dashboard.otel]. Start the orchestrator. Wait for the dashboard to be reachable (HTTP GET to dashboard port). Test 1 (otel_ingest_spans): Construct an ExportTraceServiceRequest with 3 spans (2 in one trace, 1 in another) using opentelemetry-proto types. Send via HTTP POST to localhost:{http_port}/v1/traces with Content-Type application/x-protobuf. Then call devrig query traces --format json and verify the output contains both trace IDs. Test 2 (otel_ingest_logs): Construct ExportLogServiceRequest with log records. POST to /v1/logs. Verify via devrig query logs. Test 3 (otel_ingest_metrics): Construct ExportMetricsServiceRequest with gauge data points. POST to /v1/metrics. Verify via devrig query metrics. Test 4 (otel_env_injection): Start devrig with dashboard enabled, verify the echo service's env (via devrig env echo) contains OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_SERVICE_NAME. Test 5 (dashboard_rest_api): GET /api/status returns 200 with JSON. GET /api/traces returns 200 with JSON array. Add otel_ingest module to tests/integration.rs. Use the test helpers from tests/common/mod.rs (TestProject, free_port, wait_for_port).",
+    "files": ["tests/integration/otel_ingest.rs", "tests/integration.rs"],
+    "validation": "cargo test --features integration otel_ingest",
+    "depends_on": [16, 17]
+  },
+  {
+    "id": 25,
+    "name": "E2E test infrastructure and Playwright config",
+    "description": "Create e2e/ directory with Playwright-based E2E tests. Create e2e/package.json with dependencies: @playwright/test (^1.50), @opentelemetry/api, @opentelemetry/sdk-trace-node, @opentelemetry/exporter-trace-otlp-http, @opentelemetry/sdk-metrics, @opentelemetry/exporter-metrics-otlp-http, @opentelemetry/sdk-logs, @opentelemetry/exporter-logs-otlp-http. Create e2e/playwright.config.ts: baseURL from env (default http://localhost:4000), timeout 30s, retries 1. Create e2e/fixtures/send-telemetry.ts: a Node.js script that creates synthetic OTLP data — generates 5 traces with multiple spans across 2 services ('api' and 'web'), 10 log records with varying severities (some with trace IDs, some without), and 3 metric time series (http.request.duration gauge, http.request.count counter). Sends all data to the OTLP HTTP endpoint using the @opentelemetry exporters. Create e2e/fixtures/devrig.test.toml: minimal config with [project] name = 'e2e-test', [services.echo] command = 'python3 -m http.server 18080' port = 18080, [dashboard] port = 18000, [dashboard.otel] grpc_port = 18317, http_port = 18318. Create e2e/helpers.ts with setup/teardown functions: startDevrig() spawns devrig start -f fixtures/devrig.test.toml, waits for dashboard port, runs send-telemetry.ts. stopDevrig() runs devrig delete. Run: cd e2e && npm install.",
+    "files": ["e2e/package.json", "e2e/playwright.config.ts", "e2e/fixtures/send-telemetry.ts", "e2e/fixtures/devrig.test.toml", "e2e/helpers.ts"],
+    "validation": "cd e2e && npm install",
+    "depends_on": [23, 24]
+  },
+  {
+    "id": 26,
+    "name": "E2E dashboard tests",
+    "description": "Create Playwright test files in e2e/dashboard/. Each test uses the helpers from e2e/helpers.ts. e2e/dashboard/overview.test.ts: navigate to /, verify service cards appear with data-testid='service-card-echo', verify status badge shows 'running'. e2e/dashboard/traces.test.ts: navigate to /traces, verify trace rows appear (data-testid='trace-row-*'), click a trace, verify waterfall renders (data-testid='waterfall-span-*'), verify span detail panel shows attributes. e2e/dashboard/metrics.test.ts: navigate to /metrics, verify metric names appear in list (data-testid='metric-name-*'), click a metric, verify chart renders (data-testid='metric-chart'). e2e/dashboard/logs.test.ts: navigate to /logs, verify log rows appear (data-testid='log-row'), use severity filter dropdown, verify filtered results change, test text search. e2e/dashboard/trace-correlation.test.ts: navigate to /logs, find a log with trace_id, click 'View Trace' link (data-testid='log-trace-link'), verify navigated to /traces/{id}. e2e/dashboard/cmd-k.test.ts: press Cmd+K (or Ctrl+K), verify palette opens, type 'traces', select, verify navigated to /traces. e2e/dashboard/dark-light.test.ts: verify dark mode is default (check document has 'dark' class), click theme toggle, verify switches to light mode, refresh page, verify persisted. e2e/dashboard/realtime.test.ts: open /traces, note trace count, send more telemetry via send-telemetry.ts, verify new traces appear without page refresh (within 5 seconds).",
+    "files": ["e2e/dashboard/overview.test.ts", "e2e/dashboard/traces.test.ts", "e2e/dashboard/metrics.test.ts", "e2e/dashboard/logs.test.ts", "e2e/dashboard/trace-correlation.test.ts", "e2e/dashboard/cmd-k.test.ts", "e2e/dashboard/dark-light.test.ts", "e2e/dashboard/realtime.test.ts"],
+    "validation": "cd e2e && npx playwright test --list",
+    "depends_on": [25]
+  },
+  {
+    "id": 27,
+    "name": "Documentation",
+    "description": "Create docs/architecture/otel-storage.md: document the ring buffer design (VecDeque-based), secondary indexes (trace_index, service_index, time_index, error_spans), eviction strategy (capacity + retention), memory model (~110MB for defaults), concurrency (tokio RwLock), sweep interval (30s). Include diagrams showing data flow from OTLP ingest to storage to query. Create docs/api/rest-api.md: document all REST endpoints. For each: HTTP method, path, query parameters with types and defaults, response schema (JSON), example curl commands, example responses. Cover: /api/traces, /api/traces/{id}, /api/traces/{id}/related, /api/metrics, /api/logs, /api/status, /api/env, /api/env/{service}, /api/services/{name}/restart, /api/services/{name}/stop, /api/ws (WebSocket). Create docs/api/query-cli.md: document all devrig query subcommands. For each: syntax, flags with descriptions and defaults, output format examples (NDJSON, table), usage examples for common workflows (debugging slow requests, investigating errors, checking system health). Update docs/guides/configuration.md: add [dashboard] section documenting port and enabled fields with defaults. Add [dashboard.otel] section documenting grpc_port, http_port, trace_buffer, metric_buffer, log_buffer, retention fields with defaults and examples. Document auto-injected env vars: OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_SERVICE_NAME, DEVRIG_DASHBOARD_URL. Add devrig query command reference to the CLI commands section. Create docs/api/ directory if it doesn't exist.",
+    "files": ["docs/architecture/otel-storage.md", "docs/api/rest-api.md", "docs/api/query-cli.md", "docs/guides/configuration.md"],
+    "validation": "test -f docs/architecture/otel-storage.md && test -f docs/api/rest-api.md && test -f docs/api/query-cli.md",
+    "depends_on": [16, 17]
+  }
+]

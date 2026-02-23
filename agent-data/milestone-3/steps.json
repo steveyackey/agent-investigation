@@ -1,0 +1,146 @@
+[
+  {
+    "id": 1,
+    "name": "Add new dependencies",
+    "description": "Add clap_complete = \"4.5\", strsim = \"0.11\", and comfy-table = \"7\" to Cargo.toml [dependencies]. These are needed by shell completions (clap_complete), validation suggestions (strsim), and startup summary tables (comfy-table). Run cargo build to verify all dependencies resolve correctly.",
+    "files": ["Cargo.toml"],
+    "validation": "cargo build",
+    "depends_on": []
+  },
+  {
+    "id": 2,
+    "name": "Config model extensions",
+    "description": "Add RestartConfig struct to src/config/model.rs with optional fields: policy (String, default \"on-failure\"), max_restarts (u32, default 10), startup_max_restarts (u32, default 3), startup_grace_ms (u64, default 2000), initial_delay_ms (u64, default 500), max_delay_ms (u64, default 30000). Add it as `#[serde(default)] pub restart: Option<RestartConfig>` to ServiceConfig. Add PartialEq derive to ServiceConfig and InfraConfig (needed for config diffing). Add Serialize derive to ServiceConfig and InfraConfig if missing (needed for comparison). Add unit tests for RestartConfig parsing: all fields specified, all defaults, invalid values.",
+    "files": ["src/config/model.rs"],
+    "validation": "cargo test config::model",
+    "depends_on": [1]
+  },
+  {
+    "id": 3,
+    "name": "Load config with raw source",
+    "description": "Modify load_config() in src/config/mod.rs to return (DevrigConfig, String) where the String is the raw TOML source text. This is needed by the validation rewrite to construct miette NamedSource with byte offsets. Update all callers: Orchestrator::from_config() in src/orchestrator/mod.rs, commands/env.rs, commands/ps.rs (if it calls load_config), and any integration test helpers. The raw source is stored alongside the config for later use by validate().",
+    "files": ["src/config/mod.rs", "src/orchestrator/mod.rs", "src/commands/env.rs", "src/commands/ps.rs", "src/commands/reset.rs", "src/commands/cluster.rs"],
+    "validation": "cargo build && cargo test",
+    "depends_on": [1]
+  },
+  {
+    "id": 4,
+    "name": "Validation rewrite with miette diagnostics",
+    "description": "Rewrite src/config/validate.rs to produce rich diagnostic errors using miette. Replace ConfigError enum with ConfigDiagnostic that implements miette::Diagnostic. Each variant gets #[diagnostic(code(devrig::xxx))], #[source_code] for NamedSource<String>, #[label] for span highlighting, and #[help] for suggestions. Change validate() signature to accept source: &str and filename: &str parameters. Implement find_span_for_value() helper that searches raw TOML source for a field value and returns its byte offset as SourceSpan. Implement find_closest_match() using strsim::jaro_winkler with threshold 0.8 for 'did you mean?' suggestions on MissingDependency errors. Update all callers of validate(): Orchestrator::from_config() must now pass source and filename. Update all existing unit tests to use the new signature. Ensure all existing validation test assertions still hold (missing dep, dup port, cycle, empty command, etc).",
+    "files": ["src/config/validate.rs", "src/orchestrator/mod.rs"],
+    "validation": "cargo test config::validate && cargo build",
+    "depends_on": [2, 3]
+  },
+  {
+    "id": 5,
+    "name": "Validate command and miette error rendering",
+    "description": "Add Validate variant to Commands enum in src/cli.rs. Create src/commands/validate.rs that loads the config file, parses it, runs validate() with source/filename, and on success prints a green confirmation message (using owo-colors). On failure, renders all diagnostics using miette::Report. Add the validate module to src/commands/mod.rs. Update main.rs to dispatch Commands::Validate. Also update the error path in Orchestrator::from_config() to render validation errors via miette::Report instead of the current plain text format. For the main.rs top-level error handler, use miette::set_hook for fancy rendering when stderr is a terminal.",
+    "files": ["src/cli.rs", "src/commands/validate.rs", "src/commands/mod.rs", "src/main.rs"],
+    "validation": "cargo build && cargo test",
+    "depends_on": [4]
+  },
+  {
+    "id": 6,
+    "name": "Supervisor enhancement with ServicePhase and crash recovery",
+    "description": "Enhance src/orchestrator/supervisor.rs with: (1) ServicePhase enum: Initial, Starting, Running, Backoff { attempt: u32 }, Failed { reason: String }, Stopped. (2) RestartMode enum: Always, OnFailure (default), Never. (3) Add startup_grace (Duration, default 2s) and startup_max_restarts (u32, default 3) to RestartPolicy. (4) Add RestartMode to RestartPolicy. (5) Modify the run() loop: track ServicePhase transitions, check exit code (exit 0 + OnFailure → don't restart), classify startup vs runtime failure based on startup_grace elapsed time, use startup_max_restarts budget for startup failures. (6) Add crash rate detection: track last 5 crash timestamps, if all within 30s → transition to Failed immediately. (7) Add a from_config() constructor on RestartPolicy that reads from the RestartConfig model type. (8) Add unit tests: phase transitions, exit code 0 with OnFailure, startup failure classification, crash rate detection, RestartMode::Never, from_config construction.",
+    "files": ["src/orchestrator/supervisor.rs"],
+    "validation": "cargo test orchestrator::supervisor",
+    "depends_on": [2]
+  },
+  {
+    "id": 7,
+    "name": "Wire restart config to orchestrator",
+    "description": "Update src/orchestrator/mod.rs Phase 5 to read RestartConfig from each ServiceConfig and construct RestartPolicy via from_config() instead of RestartPolicy::default(). If no restart config is specified, use default policy. Add status event logging: when the supervisor detects a crash/restart, print a colored status line to stdout (e.g., 'devrig: api crashed (exit 1), restarting in 2s (attempt 3/10)' in yellow, 'devrig: worker failed after 10 restart attempts' in red). These status lines interleave with log output using the log broadcast channel with a special 'devrig' service name prefix.",
+    "files": ["src/orchestrator/mod.rs"],
+    "validation": "cargo build && cargo test",
+    "depends_on": [6]
+  },
+  {
+    "id": 8,
+    "name": "LogLine enhancement with timestamp and level",
+    "description": "Update LogLine struct in src/ui/logs.rs to add: timestamp: DateTime<Utc> (from chrono), level: Option<LogLevel>. Add LogLevel enum: Trace, Debug, Info, Warn, Error. Add a detect_log_level() function using regex to detect log levels from text: patterns like [INFO], level=info, \"level\":\"info\", WARN, ERROR, etc. Update all LogLine construction sites in supervisor.rs to set timestamp to Utc::now() and level to detect_log_level(&text). LogLine must derive Clone (already does). Add Serialize derive to LogLine and LogLevel for JSONL export. Add unit tests for detect_log_level with various log formats.",
+    "files": ["src/ui/logs.rs", "src/orchestrator/supervisor.rs"],
+    "validation": "cargo test ui::logs && cargo build",
+    "depends_on": [1]
+  },
+  {
+    "id": 9,
+    "name": "Broadcast channel and JSONL log writer",
+    "description": "Replace the mpsc::channel<LogLine> in src/orchestrator/mod.rs Phase 5 with tokio::sync::broadcast::channel::<LogLine>(4096). Update LogWriter to accept broadcast::Receiver instead of mpsc::Receiver. Handle RecvError::Lagged(n) by logging a warning. Add a JSONL file writer task: subscribes to the broadcast channel, writes each LogLine as a JSON object to .devrig/logs/current.jsonl using serde_json::to_string(). Create the .devrig/logs/ directory at startup. Truncate the log file on each start (fresh session). Add a ring buffer module at src/ui/buffer.rs: LogBuffer struct wrapping VecDeque<LogLine> with configurable capacity (default 10000), behind Arc<RwLock<LogBuffer>>. Add methods: push(), tail(n), since(timestamp), all(). Add a buffer consumer task that subscribes to broadcast and pushes to the buffer. Update supervisor.rs to use broadcast::Sender instead of mpsc::Sender.",
+    "files": ["src/orchestrator/mod.rs", "src/ui/logs.rs", "src/ui/buffer.rs", "src/ui/mod.rs", "src/orchestrator/supervisor.rs"],
+    "validation": "cargo build && cargo test",
+    "depends_on": [8]
+  },
+  {
+    "id": 10,
+    "name": "Log filter implementation",
+    "description": "Create src/ui/filter.rs with LogFilter struct containing: services: Vec<String> (filter to specific services), min_level: Option<LogLevel>, include: Option<Regex> (grep pattern), exclude: Option<Regex> (exclude pattern), stderr_only: bool. Implement matches(&LogLine) -> bool method that checks all predicates in sequence (AND logic). Add unit tests: service filter, level filter, regex include, regex exclude, combined filters, empty filter matches all.",
+    "files": ["src/ui/filter.rs", "src/ui/mod.rs"],
+    "validation": "cargo test ui::filter",
+    "depends_on": [8]
+  },
+  {
+    "id": 11,
+    "name": "Logs command with filtering and export",
+    "description": "Add Logs variant to Commands enum in src/cli.rs with fields: services: Vec<String>, follow: bool (-f/--follow), tail: Option<usize> (--tail), since: Option<String> (--since), grep: Option<String> (-g/--grep), exclude: Option<String> (-v/--exclude), level: Option<String> (-l/--level), format: String (--format, default 'text', also 'json'), output: Option<PathBuf> (-o/--output), timestamps: bool (-t/--timestamps). Create src/commands/logs.rs that: resolves config path, reads .devrig/logs/current.jsonl, deserializes LogLine entries, applies LogFilter, formats output (text with colors or JSONL), writes to stdout or --output file. For --follow mode: use notify to watch the JSONL file for appends, read new lines as they appear. For --tail N: read last N lines from file. For --since: parse duration strings (5m, 1h, 30s) or RFC3339 timestamps, filter by LogLine.timestamp. Add to commands/mod.rs and main.rs dispatch.",
+    "files": ["src/cli.rs", "src/commands/logs.rs", "src/commands/mod.rs", "src/main.rs"],
+    "validation": "cargo build && cargo test",
+    "depends_on": [9, 10]
+  },
+  {
+    "id": 12,
+    "name": "Startup summary rewrite with comfy-table and owo-colors",
+    "description": "Rewrite src/ui/summary.rs to use comfy-table for structured table output and owo-colors for coloring. Structure output into separate sections matching the PRD design: header line ('devrig' bold + project name cyan + id dimmed), Services section (table with Name, URL, Status columns), Infrastructure section (if any infra), Cluster section (if any cluster deploys). Use comfy-table for each section table. Status indicators: green dot for 'running'/'ready', yellow for 'backoff', red for 'failed'. URLs colored cyan. Auto-assigned ports get '(auto)' suffix dimmed. Cluster section shows 'Use: devrig k get pods' hint. End with 'Press Ctrl+C to stop' dimmed. Detect terminal and disable colors when piping (is-terminal check). Update RunningService struct to include resource_type field (Service, Infra, Compose, Cluster) for section grouping.",
+    "files": ["src/ui/summary.rs", "src/orchestrator/mod.rs"],
+    "validation": "cargo build && cargo test",
+    "depends_on": [1]
+  },
+  {
+    "id": 13,
+    "name": "Log output enhancement with owo-colors",
+    "description": "Rewrite the display logic in src/ui/logs.rs LogWriter to use owo-colors instead of raw ANSI escape codes. Add optional timestamp display (dimmed, HH:MM:SS format). Add colored log level indicator: TRACE dimmed, DEBUG blue, INFO green, WARN yellow, ERROR red. Dimmed pipe separator. stderr lines get red text. Wrap stdout in BufWriter with periodic flush (every 16ms via tokio::time::interval) for performance under high log volume. Service name colors still cycle through 6 colors but use owo-colors API. The LogWriter now accepts a LogFilter to skip non-matching lines.",
+    "files": ["src/ui/logs.rs"],
+    "validation": "cargo build && cargo test",
+    "depends_on": [9, 10, 12]
+  },
+  {
+    "id": 14,
+    "name": "Config diff implementation",
+    "description": "Create src/config/diff.rs with ConfigDiff struct containing: services_added: Vec<String>, services_removed: Vec<String>, services_changed: Vec<String>, infra_added: Vec<String>, infra_removed: Vec<String>, infra_changed: Vec<String>, global_env_changed: bool, project_name_changed: bool. Implement ConfigDiff::compute(old: &DevrigConfig, new: &DevrigConfig) -> ConfigDiff that compares BTreeMap keys for added/removed and PartialEq for changed detection. Add unit tests: no changes, service added, service removed, service command changed, infra image changed, env changed, project name changed.",
+    "files": ["src/config/diff.rs", "src/config/mod.rs"],
+    "validation": "cargo test config::diff",
+    "depends_on": [2]
+  },
+  {
+    "id": 15,
+    "name": "Config file watcher",
+    "description": "Create src/config/watcher.rs implementing config file watching. Use notify + notify-debouncer-mini with 500ms debounce (same pattern as src/cluster/watcher.rs). Watch the parent directory of the config file (not the file itself — critical for vim/emacs atomic saves). Filter events to only the config filename. On change: re-read file, parse TOML, validate (if invalid: log miette diagnostic error, keep old config). If valid: compute ConfigDiff. If project_name_changed: log warning 'project name changed; run devrig delete && devrig start to apply' and skip. Otherwise: log what changed and send the diff through a tokio::sync::mpsc channel to the orchestrator. Export a start_config_watcher() function that takes config_path, CancellationToken, and returns an mpsc::Receiver<ConfigDiff>. Wire into src/orchestrator/mod.rs: after Phase 5 and startup summary, spawn the config watcher task. In the main event loop (where it waits for ctrl_c), also select on the config change receiver. On receiving a ConfigDiff: stop removed services (cancel their supervisors), restart changed services (cancel then re-spawn with new config), start newly added services. For infra changes in the initial implementation: log that infra changes require restart ('infra changed; run devrig stop && devrig start to apply').",
+    "files": ["src/config/watcher.rs", "src/config/mod.rs", "src/orchestrator/mod.rs"],
+    "validation": "cargo build && cargo test",
+    "depends_on": [4, 14]
+  },
+  {
+    "id": 16,
+    "name": "Shell completions command",
+    "description": "Add Completions variant to Commands enum in src/cli.rs: `Completions { #[arg(value_enum)] shell: clap_complete::aot::Shell }`. Add ValueHint::FilePath to the -f/--file global argument for better zsh/fish completions. Create the command handler in main.rs (inline, no separate command file needed): call clap_complete::aot::generate(shell, &mut Cli::command(), \"devrig\", &mut std::io::stdout()). Add dispatch in main.rs match block.",
+    "files": ["src/cli.rs", "src/main.rs"],
+    "validation": "cargo build && cargo run -- completions bash | head -5",
+    "depends_on": [1]
+  },
+  {
+    "id": 17,
+    "name": "Integration tests",
+    "description": "Create integration tests in tests/integration/ for v0.4 features. (1) tests/integration/validate_command.rs: test devrig validate with a valid config (exit 0, success message), test with invalid config (exit non-zero, error output contains diagnostic info like 'does not exist'). (2) tests/integration/crash_recovery_v2.rs: test service exits non-zero restarts (existing test enhanced), test service exits 0 with on-failure policy does not restart, test max_restarts exhaustion. (3) tests/integration/logs_command.rs: start a service that prints lines, stop it, then run devrig logs to verify JSONL file exists and contains expected lines. Test --format json output is valid JSON. (4) tests/integration/completions.rs: test devrig completions bash/zsh/fish each produce non-empty output. All tests gated behind #[cfg(feature = \"integration\")].",
+    "files": ["tests/integration/validate_command.rs", "tests/integration/crash_recovery_v2.rs", "tests/integration/logs_command.rs", "tests/integration/completions.rs"],
+    "validation": "cargo test --features integration -- validate_command completions",
+    "depends_on": [5, 7, 11, 13, 16]
+  },
+  {
+    "id": 18,
+    "name": "Documentation updates",
+    "description": "Update docs/guides/configuration.md to add: (1) [services.*.restart] section documenting all restart config fields (policy, max_restarts, startup_max_restarts, startup_grace_ms, initial_delay_ms, max_delay_ms) with defaults and examples. (2) New CLI commands section: devrig validate (with example output), devrig logs (all flags documented with examples), devrig completions (installation instructions for bash/zsh/fish). (3) Config watching behavior explanation (auto-reload on save, invalid config rejected). Update README.md to mention new v0.4 features in the feature list.",
+    "files": ["docs/guides/configuration.md"],
+    "validation": "test -f docs/guides/configuration.md",
+    "depends_on": [17]
+  }
+]
