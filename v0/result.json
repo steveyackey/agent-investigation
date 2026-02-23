@@ -1,0 +1,9 @@
+{
+  "approach": "v0-bare-prompt",
+  "model": "claude-opus-4-6",
+  "cost_usd": 1.618329,
+  "duration_ms": 387574,
+  "duration_human": "6m 27s",
+  "turns": 53,
+  "status": "success"
+}
