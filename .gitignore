@@ -10,4 +10,6 @@ v0-sonnet-skill/app/
 v0-sonnet-teams/app/
 v0-sonnet-skill-teams/app/
 v0-haiku/app/
+cli-opus/app/
+cli-sonnet/app/
 logs/
