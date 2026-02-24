@@ -8,4 +8,6 @@ v2/agent-data/
 v0-sonnet/app/
 v0-sonnet-skill/app/
 v0-sonnet-teams/app/
+v0-sonnet-skill-teams/app/
+v0-haiku/app/
 logs/

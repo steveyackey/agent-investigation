@@ -1,0 +1,9 @@
+{
+  "approach": "v0-haiku",
+  "model": "claude-haiku-4-5-20251001",
+  "cost_usd": 0.96501525,
+  "duration_ms": 503497,
+  "duration_human": "8m 23s",
+  "turns": 103,
+  "status": "success"
+}

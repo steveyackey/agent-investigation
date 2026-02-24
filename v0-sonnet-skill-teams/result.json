@@ -1,0 +1,9 @@
+{
+  "approach": "v0-sonnet-skill-teams",
+  "model": "claude-sonnet-4-6",
+  "cost_usd": 2.0567652500000007,
+  "duration_ms": 357529,
+  "duration_human": "5m 57s",
+  "turns": 12,
+  "status": "success"
+}
