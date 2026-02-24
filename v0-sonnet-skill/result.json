@@ -1,0 +1,9 @@
+{
+  "approach": "v0-sonnet-skill",
+  "model": "claude-sonnet-4-6",
+  "cost_usd": 1.5745959999999999,
+  "duration_ms": 423815,
+  "duration_human": "7m 3s",
+  "turns": 42,
+  "status": "success"
+}

@@ -1,0 +1,15 @@
+{
+	"name": "mood-radio-v0-sonnet-teams",
+	"version": "0.1.0",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"start": "bun run run.ts"
+	},
+	"dependencies": {
+		"@anthropic-ai/claude-agent-sdk": "latest"
+	},
+	"devDependencies": {
+		"@types/bun": "latest"
+	}
+}

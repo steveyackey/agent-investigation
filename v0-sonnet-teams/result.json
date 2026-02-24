@@ -1,0 +1,9 @@
+{
+  "approach": "v0-sonnet-teams",
+  "model": "claude-sonnet-4-6",
+  "cost_usd": 2.17761225,
+  "duration_ms": 498225,
+  "duration_human": "8m 18s",
+  "turns": 12,
+  "status": "success"
+}
