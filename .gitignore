@@ -16,4 +16,6 @@ vague-opus/app/
 vague-sonnet/app/
 vague-sdk/app/
 vague-sdk/node_modules/
+dotnet-raw/app/
+dotnet-structured/app/
 logs/

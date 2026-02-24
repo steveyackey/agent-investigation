@@ -1,0 +1,9 @@
+{
+  "approach": "vague-sdk",
+  "model": "claude-opus-4-6",
+  "cost_usd": 1.6336731500000001,
+  "duration_ms": 456005,
+  "duration_human": "7m 36s",
+  "turns": 12,
+  "status": "success"
+}
